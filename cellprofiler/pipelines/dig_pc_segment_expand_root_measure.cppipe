@@ -37,7 +37,7 @@ Smooth:[module_num:3|svn_version:\'Unknown\'|variable_revision_number:2|show_win
 IdentifyPrimaryObjects:[module_num:4|svn_version:\'Unknown\'|variable_revision_number:13|show_window:True|notes:\x5B\x5D|batch_state:array(\x5B\x5D, dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:\xff\xfeF\x00i\x00l\x00t\x00e\x00r\x00e\x00d\x00I\x00m\x00a\x00g\x00e\x00
     Name the primary objects to be identified:\xff\xfeI\x00d\x00e\x00n\x00t\x00i\x00f\x00y\x00P\x00r\x00i\x00m\x00a\x00r\x00y\x00O\x00b\x00j\x00e\x00c\x00t\x00s\x00
-    Typical diameter of objects, in pixel units (Min,Max):\xff\xfe1\x000\x00,\x004\x000\x000\x00
+    Typical diameter of objects, in pixel units (Min,Max):\xff\xfe4\x000\x00,\x004\x000\x000\x00
     Discard objects outside the diameter range?:\xff\xfeY\x00e\x00s\x00
     Discard objects touching the border of the image?:\xff\xfeY\x00e\x00s\x00
     Method to distinguish clumped objects:\xff\xfeI\x00n\x00t\x00e\x00n\x00s\x00i\x00t\x00y\x00
@@ -52,9 +52,9 @@ IdentifyPrimaryObjects:[module_num:4|svn_version:\'Unknown\'|variable_revision_n
     Maximum number of objects:\xff\xfe5\x000\x000\x00
     Use advanced settings?:\xff\xfeY\x00e\x00s\x00
     Threshold setting version:\xff\xfe1\x000\x00
-    Threshold strategy:\xff\xfeA\x00d\x00a\x00p\x00t\x00i\x00v\x00e\x00
-    Thresholding method:\xff\xfeM\x00i\x00n\x00i\x00m\x00u\x00m\x00 \x00c\x00r\x00o\x00s\x00s\x00 \x00e\x00n\x00t\x00r\x00o\x00p\x00y\x00
-    Threshold smoothing scale:\xff\xfe2\x00.\x007\x00
+    Threshold strategy:\xff\xfeG\x00l\x00o\x00b\x00a\x00l\x00
+    Thresholding method:\xff\xfeO\x00t\x00s\x00u\x00
+    Threshold smoothing scale:\xff\xfe0\x00
     Threshold correction factor:\xff\xfe1\x00.\x000\x00
     Lower and upper bounds on threshold:\xff\xfe0\x00.\x000\x00,\x001\x00.\x000\x00
     Manual threshold:\xff\xfe0\x00.\x000\x00
