@@ -109,7 +109,7 @@ IdentifyPrimaryObjects:[module_num:7|svn_version:\'Unknown\'|variable_revision_n
     # of deviations:\xff\xfe2\x00.\x000\x00
     Thresholding method:\xff\xfeO\x00t\x00s\x00u\x00
 
-IdentifySecondaryObjects:[module_num:8|svn_version:\'Unknown\'|variable_revision_number:10|show_window:True|notes:\x5B\x5D|batch_state:array(\x5B\x5D, dtype=uint8)|enabled:False|wants_pause:False]
+IdentifySecondaryObjects:[module_num:8|svn_version:\'Unknown\'|variable_revision_number:10|show_window:True|notes:\x5B\x5D|batch_state:array(\x5B\x5D, dtype=uint8)|enabled:True|wants_pause:False]
     Select the input objects:\xff\xfeI\x00d\x00e\x00n\x00t\x00i\x00f\x00y\x00P\x00r\x00i\x00m\x00a\x00r\x00y\x00O\x00b\x00j\x00e\x00c\x00t\x00s\x00
     Name the objects to be identified:\xff\xfeI\x00d\x00e\x00n\x00t\x00i\x00f\x00y\x00S\x00e\x00c\x00o\x00n\x00d\x00a\x00r\x00y\x00O\x00b\x00j\x00e\x00c\x00t\x00s\x00
     Select the method to identify the secondary objects:\xff\xfeP\x00r\x00o\x00p\x00a\x00g\x00a\x00t\x00i\x00o\x00n\x00
