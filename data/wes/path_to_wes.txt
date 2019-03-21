@@ -1,0 +1,5 @@
+fc-efad1d1d-ce9a-4789-985e-230e813ba7a1/Cancer_Cell_Line_Factory_CCLF_WES/RP-571/Exome/CCLF_AB1041T # channel 1+2
+fc-efad1d1d-ce9a-4789-985e-230e813ba7a1/Cancer_Cell_Line_Factory_CCLF_WES/RP-571/Exome/CCLF_RCRF1015T # channel 1+2
+fc-efad1d1d-ce9a-4789-985e-230e813ba7a1/Cancer_Cell_Line_Factory_CCLF_WES/RP-571/Exome/CCLF_RCRF1014T # channel 1
+fc-efad1d1d-ce9a-4789-985e-230e813ba7a1/Cancer_Cell_Line_Factory_CCLF_WES/RP-571/Exome/CCLF_NH1006T # channel 1
+fc-efad1d1d-ce9a-4789-985e-230e813ba7a1/Cancer_Cell_Line_Factory_CCLF_WES/RP-571/Exome/CCLF_AB1053T_ASC #channel 1 
