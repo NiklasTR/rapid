@@ -1,0 +1,551 @@
+---
+title: "Patient Analysis: cRCRF1047T"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = TRUE)
+```
+
+# Introduction
+
+This vignette comprises 3 drug screenings. 2 compound tests were performed based on the same sample on two independent timepoints from cryopreserved stocks. Another, third, test was conducted using a sample that was collected a few weeks after therapy initiation with a 5FU based therapy. 
+
+# Goal
+
+The goals of this analysis are: 
+* show behaviour of viability over time for untreated and control samples
+* show robustness of sample viability behaviour over time between replicates
+* show similar patterns in compound response for both biological replciates 
+* explore differences in compound response for sample 1047 vs. 1066
+* explore alternative ways to describe drug response, for example by predicting timepoint and drug-concentration from a set of single cells 
+* explore phenotype differences between immune cells and cancer cells in the fluid samples. 
+
+# Metadata
+
+## Run: 0000 1204 9003
+
+* *sample used*: cRCRF1047T
+* *date*: 28/01/2019
+* *number of vials:* 2 jumbo vials, 2*10e8 cells
+* *drug perturbation:* performed
+* *imaging protocol:* high_intensity_6h
+
+### Notes 
+Regular 2/3 layout with pure and mixed population. 
+**Layout Error:** plate was in the wrong order during imaging - with 180 degrees - CCLF barcode facing to wall because it was moved. This was 100% the case for imaging runs on the 31-1-19 and 01-02-19. This is most probably true for the runs on the days before.
+
+
+## Run: 0000 1204 8903
+
+* *sample used*: cRCRF1047T
+* *date*: 05/02/2019
+* *number of vials:* 2 jumbo vials, 2*10e8 cells
+* *drug perturbation:* performed
+* *imaging protocol:* high_intensity_6h
+
+### Notes
+Regular 2/3 layout with pure and mixed population. 
+No layout error during microscopy this time.
+
+## Run: 0000 1204 8703
+
+* *sample used*: cRCRF1066T
+* *date*: 27/02/2019
+* *number of vials:* 2 jumbo vials, 2*10e8 cells
+* *drug perturbation:* performed
+* *imaging protocol:* high_intensity_6h
+
+### Notes 
+Only limited cells during sample processing after depletion. I had to seed cells with limited density at 125k/ml (50% of usual concentration) for section 1 and seeded 100% pure raw cells in section 2. Section 3 remained empty. There were selected pipetting errors in wells $c("K16", "M16", "N13", "N14", "N15", "N16", "P13", "P14", "P15", "P16")$ that have to be excluded later on. 
+
+
+
+
+```{r}
+library(tidyverse)
+library(here)
+library(pool)
+library(viridis)
+library(reticulate)
+library(umap)
+library(dbscan)
+```
+
+I access the databases in the S3 bucket for replicate one and two of sample 1047. 
+
+```{r}
+database_1 <- "~/bucket/data/cellevent_tmrm_cellprofiler2019-03-19011922.db"
+database_2 <- "~/bucket/data/cellevent_tmrm_cellprofiler2019-03-19005713.db"
+
+pool <- pool::dbPool(RSQLite::SQLite(), dbname = database)
+
+db_list_tables(pool)
+
+replicate_1 <- tbl(pool, "cells")
+index_1 <- tbl(pool, "index")
+
+replicate_1_j <- replicate_1 %>% 
+  left_join(index_1)
+```
+
+I also load the drug library annotation file. 
+
+```{r, message=FALSE, warning=FALSE}
+plate_anno <- read_delim("~/bucket/annotation/20181016105007_registered_7296_NRindtorff_registration_Kekule.txt", 
+    "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
+  dplyr::select(compound = alias, compound_name, concentration_value = concentration) %>%
+  rbind(tibble(compound = "DMSO", compound_name = "DMSO", concentration_value = NA)) %>%
+  left_join(., read_csv("~/bucket/annotation/cclf_ascites_1910.csv")) %>% 
+  dplyr::select(well, compound_name, compound, concentration, concentration_value)
+
+
+```
+
+
+Now I 
+
+```{r, eval = FALSE}
+
+
+index_1 <- replicate_1 %>%
+  dplyr::select(id, object_number, image_number) %>% 
+  collect() %>%
+  separate(id, c("id_a", "id_b", "id_c", "id_d", "time", "well", "field", "channel"), 
+           sep = "-", remove = FALSE) %>% 
+  unite(plate, c("id_a", "id_b", "id_c", "id_d"))
+
+copy_to(pool, index_1, "index",
+  overwrite = TRUE,
+  temporary = FALSE)
+
+index_1 <- tbl(pool, "index")
+```
+
+First I create a table with more interpretable identifiers, that I can use to filter the dataset. 
+
+Next I evaluate the size distribution of segmented objects and exclude objects that have extreme values. 
+
+```{r}
+area <- replicate_1 %>% 
+  dplyr::select(area_shape_area, id) %>%
+  collect()
+
+area_percentile <- area$area_shape_area %>% quantile(probs = seq(0, 1, 0.01))
+
+
+area %>% 
+  filter(area_shape_area < area_percentile[100] & area_shape_area > area_percentile[2]) %>%
+  ggplot(aes(area_shape_area)) + 
+  geom_histogram() + 
+  theme_classic()
+```
+
+
+```{r}
+p <- replicate_1_j %>% 
+  #select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, well, time, plate) %>% 
+  ggplot(aes(intensity_integrated_intensity_ch4)) + 
+  geom_histogram() +
+  theme_bw() + 
+  facet_grid(plate ~ time) + 
+  scale_x_log10()
+
+p + geom_vline(xintercept = 500)
+
+# replicate_1_j %>% 
+#   select(intensity_integrated_intensity_ch4, well, time, plate) %>%
+#   filter(intensity_integrated_intensity_ch4 < 100 & intensity_integrated_intensity_ch4 > 1000) %>%
+#   group_by()
+```
+
+
+```{r}
+replicate_1_j %>% 
+  #select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, well, time, plate) %>% 
+  ggplot(aes(intensity_integrated_intensity_ch4)) + 
+  geom_histogram() +
+  theme_bw() + 
+  facet_grid(plate ~ time) + 
+  scale_x_log10()
+```
+
+
+```{r}
+replicate_1_j %>% 
+  #select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, well, time, plate) %>% 
+  ggplot(aes(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3)) + 
+  geom_hex() +
+  theme_bw() + 
+  facet_grid(plate ~ time) + 
+  scale_x_log10() + 
+  scale_y_log10() + 
+  scale_fill_viridis()
+```
+
+
+```{r}
+max <- area_percentile[100] %>% unname()
+min <- area_percentile[2] %>% unname()
+
+replicate_1_jg <- replicate_1_j %>% 
+  #removing outliers
+  dplyr::filter(area_shape_area < max & area_shape_area > min) %>%
+  group_by(well, time) %>% 
+  summarise_at(vars(area_shape_area:texture_variance_ch4_3_03), funs(mean, var, n), na.rm = TRUE)  %>% collect()
+```
+
+# Quick and Dirty cutoff 
+
+```{r}
+replicate_1_jd <- replicate_1_j %>% 
+  #removing outliers
+  dplyr::filter(area_shape_area < max & area_shape_area > min) %>% 
+  mutate(alive = if_else(intensity_integrated_intensity_ch4 > 500, 1, 0))
+
+replicate_1_jdr <- replicate_1_jd %>% 
+  group_by(well, time, plate) %>%
+  summarise(n = n(),
+            sum = sum(alive)) %>% 
+  mutate(prop = sum/n)
+
+viability <- replicate_1_jdr %>% 
+  #head(100) %>% 
+  collect()
+```
+
+```{r}
+viability %>% 
+  ggplot(aes(prop, n)) + 
+  geom_smooth(method = "lm") + 
+  geom_point(alpha = 0.3) +
+  theme_bw() + 
+  facet_grid(plate ~ time) + 
+  scale_y_log10()
+  
+```
+
+```{r}
+viability_anno <- viability %>% 
+  left_join(plate_anno) %>% 
+  mutate(time_point = stringr::str_sub(plate, -1, -1) %>% as.numeric(),
+         time_point = time_point*2,
+         time_point = if_else(time == "sk1", time_point-1, time_point)) %>% 
+  ungroup() #%>%
+ # group_by(compound_name, concentration, time_point) %>% 
+ # summarise(n = sum(n),
+     #       sum = sum(sum),
+    #        prop = sum/n)
+```
+
+```{r}
+viability_anno %>%
+  #filter(compound_name == "Trametinib") %>% 
+  ggplot(aes(time_point, prop, color = concentration, group = concentration)) + 
+  geom_point() + 
+  geom_line(aes(group = concentration)) +
+  theme_bw() + 
+  facet_wrap(~compound_name)
+```
+
+
+```{r}
+viability_anno %>%
+  filter(compound_name %in% c("DMSO", "Boretzomib")) %>% 
+  ggplot(aes(time_point, prop, color = compound_name, group = concentration)) + 
+  geom_point() + 
+  geom_smooth(aes(group = compound_name))+
+ #geom_line(aes(group = compound_name)) +
+  theme_bw() #+ 
+  #facet_wrap(~compound_name)
+```
+
+```{r}
+viability_anno %>%
+  #filter(compound_name == "Afatinib") %>% 
+  ggplot(aes(concentration, prop, color = time_point, group = time_point)) + 
+  geom_point() + 
+  geom_line(aes(group = time_point)) +
+  theme_bw() + 
+  facet_wrap(~compound_name) + 
+  scale_x_reverse()
+```
+
+
+We can see a slight shift of estimated proportions dependent on the day of measurment and the number of observations. We should apply an emperical bayes estimator to account for both effects that impact proportions.
+
+# UMAP
+
+I define UMAP parameters for efficient clustering 
+
+```{r}
+umap_settings_cluster <- umap.defaults
+# according to https://umap-learn.readthedocs.io/en/latest/clustering.html we change our parameters
+umap_settings_cluster$n_neighbors <- 30
+umap_settings_cluster$min_dist <- 0
+```
+
+I create a sample from the dataset
+
+```{r}
+set.seed(3423)
+
+sample_index <- index_1 %>% collect() %>% 
+  group_by(well, time, plate) %>% 
+  sample_n(10) %>% 
+  ungroup() %>%
+  dplyr::select(id, object_number, image_number)
+
+
+sample <- replicate_1_j %>% 
+  #removing outliers
+  dplyr::filter(area_shape_area < max & area_shape_area > min) %>% 
+  left_join(sample_index,., copy = TRUE) %>% 
+  drop_na()
+```
+
+
+
+I create a UMAP embedding
+
+```{r}
+no_umap_sample <- sample %>% 
+  dplyr::select(everything(),
+                -contains("location"),
+                -contains("_x"),
+                -contains("_y"),
+                -id, -plate, -time, -well, -field, -channel,
+                -number_object_number,
+                -parent_identify_primary_objects,
+                -image_number,
+                -object_number,
+                -area_shape_euler_number,
+                -area_shape_center_z) %>% 
+  as.data.frame() %>%
+  #mutate_all(funs(as.numeric)) %>%
+  as.matrix()
+
+no_umap_sample_bf <- no_umap_sample %>% 
+  as.data.frame() %>%
+  dplyr::select(everything(), 
+                -contains("ch3"),
+                -contains("ch4")) %>% 
+  mutate_all(funs(as.numeric)) %>%
+  as.matrix()
+
+umap_sample <- no_umap_sample %>%
+  umap(config = umap_settings_cluster)
+
+saveRDS(umap_sample, "umap_sample.Rdata")
+
+umap_sample_bf <- no_umap_sample_bf %>%
+  umap(config = umap_settings_cluster)
+
+saveRDS(umap_sample_bf, "umap_sample_bf.Rdata")
+```
+
+Do I need a UMAP embedding? 
+
+```{r, eval = FALSE}
+cluster_no_umap <- no_umap_sample %>% 
+  dbscan::hdbscan(minPts = 200)
+
+saveRDS(cluster_no_umap, "cluster_no_umap.Rdata")
+```
+
+After running the embedding, we see how most cells can actually not be assigned to a given cluster. Let's try applying a UMAP nonlinearity.
+
+```{r}
+readRDS("cluster_no_umap.Rdata")
+```
+
+I run a quick QC of the embedding. 
+
+```{r}
+umap_sample$layout %>% as_tibble() %>% cbind(sample,.) %>%
+  ggplot(aes(V1, V2, color = intensity_integrated_intensity_ch3)) + 
+  geom_point(alpha = 0.3) + 
+  facet_grid(plate ~ time) + 
+  theme_bw() + 
+  scale_color_viridis()
+  
+  
+cluster <- umap_sample$layout %>% 
+  dbscan::hdbscan(minPts = 200)
+
+umap_sample$layout %>% as_tibble() %>% cbind(cluster$cluster,.) %>%
+  magrittr::set_colnames(c("cluster", "V1", "V2")) %>%
+  mutate(cluster = factor(cluster)) %>%
+  cbind(sample,.) %>%
+  ggplot(aes(V1, V2, color = cluster)) + 
+  geom_point(alpha = 0.3) + 
+  facet_grid(plate ~ time) + 
+  theme_bw()
+```
+
+
+```{r}
+umap.learn.predict
+```
+
+
+I also create an embedding only based on brightfield data 
+
+
+```{r}
+umap_sample_bf$layout %>% as_tibble() %>% cbind(sample,.) %>%
+  ggplot(aes(V1, V2, color = intensity_integrated_intensity_ch4)) + 
+  geom_point(alpha = 0.3) + 
+  facet_grid(plate ~ time) + 
+  theme_bw() + 
+  scale_color_viridis()
+  
+  
+cluster_bf <- umap_sample_bf$layout %>% 
+  dbscan::hdbscan(minPts = 200)
+
+umap_sample_bf$layout %>% as_tibble() %>% cbind(cluster_bf$cluster,.) %>%
+  magrittr::set_colnames(c("cluster", "V1", "V2")) %>%
+  mutate(cluster = factor(cluster)) %>%
+  cbind(sample,.) %>%
+  ggplot(aes(V1, V2, color = cluster)) + 
+  geom_point(alpha = 0.3) + 
+  facet_grid(plate ~ time) + 
+  theme_bw()
+```
+
+I decide to continue my analysis with only brightfield images. It turns out that the features from brightfield images carry a lot of information and -in addition- are more stable over time. Cell Event and TMRM are not stable over time.
+
+On the other hand, we don't know if the brightfield derived features are just not expressive enough and the reduction of Cell Event is actually driven by biology, rather than simple bleaching or degradation over time. 
+
+As a consequence, it might be best to generate both projections for the dataset.
+
+```{r}
+id_of_interest = "000012048903__2019-02-06T20_33_15-Measurement_2-sk1-A01-f01-ch1"
+
+transfer_umap <- function(id_of_interest, bf_umap_object, umap_object){
+# collect data
+umap_df <- replicate_1_j %>% 
+  dplyr::filter(area_shape_area < max & area_shape_area > min) %>% 
+  filter(id %in% id_of_interest) %>%
+  dplyr::select(everything(),
+                -contains("location"),
+                -contains("_x"),
+                -contains("_y"),
+                -(image_number:object_number),
+                -number_object_number,
+                -parent_identify_primary_objects,
+                -(id:channel),
+                -area_shape_euler_number,
+                -area_shape_center_z) %>% collect() %>%
+  distinct()
+
+# matrix
+umap_matrix <- umap_df %>%
+  as.matrix()
+
+# matrix brightfield
+umap_matrix_bf <- umap_df %>% 
+  dplyr::select(everything(), 
+                -contains("ch3"),
+                -contains("ch4")) %>% 
+  as.matrix()
+
+# umap brightfield
+output_bf <- predict(bf_umap_object, umap_matrix_bf) %>% 
+  janitor::clean_names() %>% 
+  magrittr::set_colnames(paste0(colnames(.), "_bf"))
+
+# umap
+output <- predict.umap(umap_object, umap_matrix) %>% 
+  janitor::clean_names()
+  
+}
+  
+```
+
+
+```{r}
+tmp <- replicate_1_j %>% 
+  dplyr::filter(area_shape_area < max & area_shape_area > min) %>%
+  dplyr::filter(time == "sk1", plate == "000012048903__2019_02_05T20_27_41_Measurement_1") %>% 
+  dplyr::select(area_shape_area:texture_variance_ch4_3_03) %>% 
+  collect()
+```
+
+
+# Evaluate Afatinib + DMSO UMAP embedding 
+
+
+For the sake of this demo, I will overwrite my sample and only focus on cells that were treated with Afatinib. 
+
+```{r}
+afatinib_index <- index_1 %>% collect() %>% 
+  left_join(plate_anno) %>% 
+  mutate(time_point = stringr::str_sub(plate, -1, -1) %>% as.numeric(),
+         time_point = time_point*2,
+         time_point = if_else(time == "sk1", time_point-1, time_point)) %>% 
+  filter(compound_name %in% c("Afatinib", "DMSO")) %>% 
+  .$id
+
+sample <- replicate_1_j %>% 
+  #removing outliers
+  dplyr::filter(area_shape_area < max & area_shape_area > min) %>% 
+  dplyr::filter(id %in% afatinib_index) %>%
+  collect()
+```
+
+
+
+```{r}
+no_umap_sample <- sample %>% 
+  dplyr::select(everything(),
+                -contains("location"),
+                -contains("_x"),
+                -contains("_y"),
+                -id, -plate, -time, -well, -field, -channel,
+                -number_object_number,
+                -parent_identify_primary_objects,
+                -image_number,
+                -object_number,
+                -area_shape_euler_number,
+                -area_shape_center_z) %>% 
+  as.data.frame() %>%
+  #mutate_all(funs(as.numeric)) %>%
+  as.matrix()
+
+no_umap_sample_bf <- no_umap_sample %>% 
+  as.data.frame() %>%
+  dplyr::select(everything(), 
+                -contains("ch3"),
+                -contains("ch4")) %>% 
+  mutate_all(funs(as.numeric)) %>%
+  as.matrix()
+
+umap_sample_afa_dmso <- no_umap_sample_bf %>%
+  umap(config = umap_settings_cluster)
+
+saveRDS(umap_sample_afa_dmso, "umap_sample_dmso_afatinib.Rdata")
+```
+
+
+```{r}
+umap_sample_afa_dmso$layout %>% as_tibble() %>% #cbind(cluster_bf$cluster,.) %>%
+  magrittr::set_colnames(c("V1", "V2")) %>%
+  #mutate(cluster = factor(cluster)) %>%
+  cbind(sample %>% dplyr::select(well, time, plate, intensity_integrated_intensity_ch4),.) %>%
+  left_join(plate_anno) %>% 
+  mutate(time_point = stringr::str_sub(plate, -1, -1) %>% as.numeric(),
+         time_point = time_point*2,
+         time_point = if_else(time == "sk1", time_point-1, time_point)) %>% 
+  ungroup() %>%
+  ggplot(aes(V1, V2, color = intensity_integrated_intensity_ch4)) + 
+  geom_point(alpha = 0.1) + 
+  #geom_density_2d() +
+  facet_grid(time_point ~ concentration) + 
+  theme_bw() + 
+  scale_color_viridis()
+```
+
+
