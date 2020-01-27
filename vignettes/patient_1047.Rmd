@@ -61,7 +61,7 @@ No layout error during microscopy this time.
 Only limited cells during sample processing after depletion. I had to seed cells with limited density at 125k/ml (50% of usual concentration) for section 1 and seeded 100% pure raw cells in section 2. Section 3 remained empty. There were selected pipetting errors in wells $c("K16", "M16", "N13", "N14", "N15", "N16", "P13", "P14", "P15", "P16")$ that have to be excluded later on. 
 
 
-
+# Data access
 
 ```{r}
 library(tidyverse)
@@ -71,23 +71,43 @@ library(viridis)
 library(reticulate)
 library(umap)
 library(dbscan)
+library(platetools)
+library(patchwork)
 ```
 
 I access the databases in the S3 bucket for replicate one and two of sample 1047. 
 
 ```{r}
-database_1 <- "~/bucket/data/cellevent_tmrm_cellprofiler2019-03-19011922.db"
-database_2 <- "~/bucket/data/cellevent_tmrm_cellprofiler2019-03-19005713.db"
+database_1 <- "~/bucket/data/cellprofiler_000012049003.db"
+database_2 <- "~/bucket/data/cellprofiler_000012048903.db"
+#database_3
 
-pool <- pool::dbPool(RSQLite::SQLite(), dbname = database)
+pool_1 <- pool::dbPool(RSQLite::SQLite(), dbname = database_1)
+pool_2 <- pool::dbPool(RSQLite::SQLite(), dbname = database_2)
+#pool_3 <- pool::dbPool(RSQLite::SQLite(), dbname = database_3)
+```
 
-db_list_tables(pool)
+I gain an overview about the databases. 
 
-replicate_1 <- tbl(pool, "cells")
-index_1 <- tbl(pool, "index")
+```{r}
+db_list_tables(pool_1)
+db_list_tables(pool_2)
+#db_list_tables(pool_3)
 
-replicate_1_j <- replicate_1 %>% 
-  left_join(index_1)
+# I export the tables into the session
+replicate_1 <- tbl(pool_1, "cells")
+index_1 <- tbl(pool_1, "index")
+
+
+replicate_2 <- tbl(pool_2, "cells")
+index_2 <- tbl(pool_2, "index")
+
+
+# replicate_3 <- tbl(pool_3, "cells")
+# index_3 <- tbl(pool_3, "index")
+# replicate_3_j <- replicate_3 %>% 
+#   left_join(index_3)
+
 ```
 
 I also load the drug library annotation file. 
@@ -99,16 +119,13 @@ plate_anno <- read_delim("~/bucket/annotation/20181016105007_registered_7296_NRi
   rbind(tibble(compound = "DMSO", compound_name = "DMSO", concentration_value = NA)) %>%
   left_join(., read_csv("~/bucket/annotation/cclf_ascites_1910.csv")) %>% 
   dplyr::select(well, compound_name, compound, concentration, concentration_value)
-
-
 ```
 
-
-Now I 
+Now I need to annotate the plate. 
 
 ```{r, eval = FALSE}
-
-
+# First I create a table with more interpretable identifiers, that I can use to filter the dataset. 
+# I use this chunk to create an index table for each database. I should incorporate that into the script.
 index_1 <- replicate_1 %>%
   dplyr::select(id, object_number, image_number) %>% 
   collect() %>%
@@ -116,43 +133,293 @@ index_1 <- replicate_1 %>%
            sep = "-", remove = FALSE) %>% 
   unite(plate, c("id_a", "id_b", "id_c", "id_d"))
 
-copy_to(pool, index_1, "index",
+copy_to(pool_1, index_1, "index",
   overwrite = TRUE,
   temporary = FALSE)
 
-index_1 <- tbl(pool, "index")
+index_1 <- tbl(pool_1, "index")
 ```
 
-First I create a table with more interpretable identifiers, that I can use to filter the dataset. 
+## Time imputation 
 
-Next I evaluate the size distribution of segmented objects and exclude objects that have extreme values. 
+In order to more realisitically understand the way cells behave over time, we need to annotate timepoints with a real world time equivalent. We do so using by using the estimated protocol time and inferring the time after the start of the experiment, so that well A01 at timepoint 1 has a different real world time that well P24 at timepoint 1.
 
 ```{r}
-area <- replicate_1 %>% 
-  dplyr::select(area_shape_area, id) %>%
+library(lubridate)
+s_per_plate <- hms("6:37:23") %>% lubridate::seconds() %>% as.numeric()
+s_per_well <- time_per_plate/384
+s_measurment_interval <- hms("24:00:00") %>% lubridate::seconds() %>% as.numeric()
+
+time_layout <- tibble(row = rep(c(LETTERS[c(16:1)], LETTERS[c(1:16)]), times = 12),
+       col = rep(c(1:24), each = 16)) %>% 
+  mutate(col = str_pad(col, 2, side = "left", pad = "0"),
+         well = paste0(row, col),
+         index = 1:384,
+         time = index*s_per_well) %>% 
+  dplyr::select(well, well_time = time)
+
+raw_map(data = time_layout$well_time,
+        well = time_layout$well,
+        plate = 384) +
+    ggtitle("Time layout for 2*6h lowint z-2 protocol used") +
+    theme_dark() +
+    scale_fill_viridis()
+```
+
+## Cell seeding
+
+Now we want to apply this time scheme over the different timepoints. I also add the cell seeding pattern to the plate, which is unique for most plates. 
+
+```{r}
+index_1 <- index_1 %>%
+  collect() %>%
+  # cleaning timepoint names
+  mutate(time_day = stringr::str_sub(plate, -1, -1) %>% as.numeric(),
+         time_point = time_day*2,
+         time_point = if_else(time == "sk1", time_point-1, time_point)) %>%
+  # this module defines the additional time in seconds added per plate
+  mutate(add_time = if_else(time_point %% 2 == 0, s_per_plate, 0),
+         add_time = add_time + (time_day-1)*s_measurment_interval) %>%
+  left_join(time_layout) %>% 
+  mutate(real_time = well_time + add_time) %>%
+  # seeding pattern 
+  mutate(col = substr(well, 2, 3)) %>% 
+  mutate(col = as.numeric(col),
+         cell = case_when(col %in% c(1:8, 13:20) ~ "cd45_minus",
+                          col %in% c(9:12, 21:24) ~ "cd45_minus_raw_mix")) %>% 
+  # adding replicate anno 
+  mutate(replicate = if_else(grepl(pattern = "12048903", plate), 2, 1))
+
+index_2 <- index_2 %>%
+  collect() %>%
+  # cleaning timepoint names
+  mutate(time_day = stringr::str_sub(plate, -1, -1) %>% as.numeric(),
+         time_point = time_day*2,
+         time_point = if_else(time == "sk1", time_point-1, time_point)) %>%
+  # this module defines the additional time in seconds added per plate
+  mutate(add_time = if_else(time_point %% 2 == 0, s_per_plate, 0),
+         add_time = add_time + (time_day-1)*s_measurment_interval) %>%
+  left_join(time_layout) %>% 
+  mutate(real_time = well_time + add_time) %>%
+  # seeding pattern 
+  mutate(col = substr(well, 2, 3)) %>% 
+  mutate(col = as.numeric(col),
+         cell = case_when(col %in% c(1:8, 13:20) ~ "cd45_minus",
+                          col %in% c(9:12, 21:24) ~ "cd45_minus_raw_mix")) %>% 
+  # adding replicate anno 
+  mutate(replicate = if_else(grepl(pattern = "12048903", plate), 2, 1))
+```
+
+
+After importing and annotating the data I create a shared object and start my exploration. 
+
+```{r}
+replicate_1_j <- replicate_1 %>%
+  left_join(index_1, copy = TRUE)
+
+replicate_2_j <- replicate_2 %>%
+  left_join(index_2, copy = TRUE)
+```
+
+# EDA and QC
+
+The object segmentation is currently not ideal. Therefore I remove objects that are clearly over or undersegmented. I evaluate the size distribution of segmented objects and exclude objects that have extreme values. 
+
+I filter all extremely sized objects from the database.
+
+```{r}
+# show behaviour of viability over time for untreated and control samples
+# show robustness of sample viability behaviour over time between replicates
+# show similar patterns in compound response for both biological replciates 
+get_area <- function(db){
+  area <- list()
+  
+  area$distribution <- db %>% dplyr::select(area_shape_area, id, cell) %>%
+  collect()
+  
+  area$area_percentile <- area$area_shape_area %>% quantile(probs = seq(0, 1, 0.01))
+  
+  area$min <- unname(area_percentile[2])
+  area$max <- unname(area_percentile[100])
+  
+  return(area)
+}
+
+area_1 <- replicate_1_j %>% get_area()
+#area_2 <- replicate_2_j %>% get_area()
+
+# updating the database
+replicate_1_j <- replicate_1_j %>%
+  filter(area_shape_area < max & area_shape_area > min)
+
+# # updating the database
+replicate_2_j <- replicate_2_j %>%
+  filter(area_shape_area < max & area_shape_area > min)
+
+area_1$distribution %>% 
+  filter(area_shape_area < area_1$max & area_shape_area > area_1$min) %>%
+  ggplot(aes(area_shape_area, fill = cell)) + 
+  geom_histogram(alpha = 0.3, position="identity") + 
+  theme_classic() + 
+  #facet_wrap(~ cell) + 
+  scale_fill_brewer(type = "qual") +
+  labs(title = "Size Distribution of segmented objects",
+       subtitle = "after removing 1% and 99% percentile",
+       caption = "1047, replicate 1") +
+  theme(legend.position = "None") +
+area_2$distribution %>%
+  filter(area_shape_area < area_2$max & area_shape_area > area_2$min) %>%
+  ggplot(aes(area_shape_area, fill = cell)) +
+  geom_histogram(alpha = 0.3, position="identity") +
+  theme_classic() +
+  #facet_wrap(~ cell) +
+  scale_fill_brewer(type = "qual") +
+  labs(caption = "1047, replicate 2") +
+  ggsave("size_histogram.png")
+
+
+```
+
+I am wondering if the number of objects stays the same over time and across wells. I calculate QC threshold values for each batch that remove wells, if the number of objects is unexpectedly large.
+
+```{r}
+get_cell_count <- function(db){
+  cell_count <- list()
+  
+  cell_count$distribution <- db %>% 
+    dplyr::select(well, cell, time_point, plate) %>% 
+    count(well, cell, time_point, plate) %>% 
+    collect()
+  
+  cell_count$threshold <- cell_count$distribution %>%
+  ungroup() %>%
+  group_by(time_point) %>% 
+  summarise(sd = sd(n),
+            mean = mean(n),
+            min = mean-3*sd,
+            max = mean+3*sd#,
+            #min = quantile(n, probs = seq(0, 1, 0.01))[2],
+            #max = quantile(n, probs = seq(0, 1, 0.01))[100]
+            )
+  
+  return(cell_count)
+}
+
+cell_count_1 <- replicate_1_j %>% get_cell_count()
+cell_count_2 <- replicate_2_j %>% get_cell_count()
+
+# plot_cell_count <- function(cell_count){
+#   cell_count
+# }
+
+cell_count_1$distribution %>%
+  ungroup() %>%
+  mutate(well = factor(well) %>% fct_inorder()) %>%
+  ggplot(aes(well, n, color = cell)) + 
+  geom_point(alpha = 0.8) + 
+  geom_smooth(color = "red") +
+  geom_hline(data = cell_count_1$threshold, aes(yintercept = min), linetype = "dashed") + 
+  geom_hline(data = cell_count_1$threshold, aes(yintercept = max), linetype = "dashed") + 
+  facet_wrap(~ time_point, ncol = 2) + 
+  theme(axis.text.x = element_blank(),
+        legend.position = "None") + 
+  #scale_y_log10() + 
+  scale_color_brewer() +
+  labs(title = "Number of objects and their distribution across the plate",
+       subtitle = "shown are well A01 to P24",
+       caption = "1047, replicate 2") + 
+cell_count_2$distribution %>%
+  ungroup() %>%
+  mutate(well = factor(well) %>% fct_inorder()) %>%
+  ggplot(aes(well, n, color = cell)) + 
+  geom_point(alpha = 0.8) + 
+  geom_smooth(color = "red") +
+  geom_hline(data = cell_count_2$threshold, aes(yintercept = min), linetype = "dashed") + 
+  geom_hline(data = cell_count_2$threshold, aes(yintercept = max), linetype = "dashed") + 
+  facet_wrap(~ time_point, ncol = 2) + 
+  theme(axis.text.x = element_blank()) + 
+  #scale_y_log10() + 
+  scale_color_brewer() +
+  labs(#title = "Number of objects and their distribution across the plate",
+       #subtitle = "shown are well A01 to P24",
+       caption = "1047, replicate 2") + 
+  ggsave("count_threshold.png", width = 8, height = 4)
+```
+
+It seems as if not all measurment data was gathered: 
+
+* Replicate 1 is missing timepoint 8. This might be because the microscope was running out of storage space and only one field of view was collected for timepoint 7. That also explains the small number of cells per well for timepoint 7. I have to be careful to sample cells in a balanced way from these datasets.
+* Replicate 2 is missing measurment data at timepoints 3 and 4. It turns out that these images were processed but for some reason the measurment data was not ingested into the database. 
+
+Based on these cutoff values I am removing wells that do not pass the QC 
+
+```{r}
+remove_wells_count <- function(index_df, cell_count){
+flag_id <- cell_count$threshold %>% 
+  dplyr::select(time_point, min, max) %>% 
+  left_join(., cell_count$distribution) %>% 
+  mutate(flag_count = if_else(n > max | n < min, TRUE, FALSE)) %>% 
+  #count(flag_count)
+  filter(flag_count == TRUE) %>% 
+  dplyr::select(plate, well) %>% 
+  left_join(index_df %>% dplyr::select(plate, well, id) %>% distinct()) %>% 
+  .$id
+
+flag_id_keep <- index_df %>% filter(!(id %in% flag_id)) %>% .$id %>% unique()
+
+return(flag_id_keep)
+}
+
+replicate_1_j <- replicate_1_j %>% 
+  filter((id %in% remove_wells_count(index_1, cell_count_1)))
+
+replicate_2_j <- replicate_2_j %>% 
+  filter((id %in% remove_wells_count(index_2, cell_count_2)))
+```
+
+I k
+
+```{r}
+dye_intensity <- replicate_2_j %>% 
+  dplyr::select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, cell, time_point) %>% 
   collect()
 
-area_percentile <- area$area_shape_area %>% quantile(probs = seq(0, 1, 0.01))
+dye_cluster <- dye_intensity %>% 
+  nest(intensity_integrated_intensity_ch3, 
+       intensity_integrated_intensity_ch4) %>% 
+  mutate(kmeans = purrr::map(data, ~ .x %>% as.matrix %>% kmeans(centers = 2)),
+         cluster = purrr::map(kmeans, ~ .x %>% .$cluster)) %>% 
+  unnest(cluster)
 
+dye_intensity %>% 
+  left_join(dye_cluster) 
 
-area %>% 
-  filter(area_shape_area < area_percentile[100] & area_shape_area > area_percentile[2]) %>%
-  ggplot(aes(area_shape_area)) + 
-  geom_histogram() + 
-  theme_classic()
-```
+get_dye_intensity <- function(db){
+  dye_intensity <- db %>% 
+  dplyr::select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, cell, time_point, id) %>% 
+  collect()
 
+dye_cluster <- dye_intensity %>% 
+  nest(intensity_integrated_intensity_ch3, 
+       intensity_integrated_intensity_ch4) %>% 
+  mutate(kmeans = purrr::map(data, ~ .x %>% as.matrix %>% kmeans(centers = 2)),
+         cluster = purrr::map(kmeans, ~ .x %>% .$cluster)) %>% 
+  unnest(cluster)
 
-```{r}
-p <- replicate_1_j %>% 
-  #select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, well, time, plate) %>% 
-  ggplot(aes(intensity_integrated_intensity_ch4)) + 
+dye_intensity %>% 
+  left_join(dye_cluster) %>% 
+  return()
+}
+
+dye_intensity_2 <- get_dye_intensity(replicate_2_j)
+
+%>%
+  ggplot(aes(intensity_integrated_intensity_ch4, color = cluster)) + 
   geom_histogram() +
   theme_bw() + 
   facet_grid(plate ~ time) + 
-  scale_x_log10()
-
-p + geom_vline(xintercept = 500)
+  scale_x_log10() + 
+  geom_vline(xintercept = 500)
 
 # replicate_1_j %>% 
 #   select(intensity_integrated_intensity_ch4, well, time, plate) %>%
@@ -229,9 +496,6 @@ viability %>%
 ```{r}
 viability_anno <- viability %>% 
   left_join(plate_anno) %>% 
-  mutate(time_point = stringr::str_sub(plate, -1, -1) %>% as.numeric(),
-         time_point = time_point*2,
-         time_point = if_else(time == "sk1", time_point-1, time_point)) %>% 
   ungroup() #%>%
  # group_by(compound_name, concentration, time_point) %>% 
  # summarise(n = sum(n),
