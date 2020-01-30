@@ -10,7 +10,10 @@ knitr::opts_chunk$set(echo = TRUE,
 
 # Introduction
 
-This vignette comprises 3 drug screenings. 2 compound tests were performed based on the same sample on two independent timepoints from cryopreserved stocks. Another, third, test was conducted using a sample that was collected a few weeks after therapy initiation with a 5FU based therapy. 
+This vignette comprises 6 drug screens that were performed in 2019. The data contains the following experiments: 
+* 3 runs performed based on the same sample (cRCRF1047T by PT-2HF4C) on independent timepoints from cryopreserved stocks by two operators (2 by Niklas Rindtorff, 1 by Mushriq Al-Jazrawe. 
+* 2 runs with samples from the same patient, wich were collected a few weeks after therapy initiation with a 5FU based therapy (CCLF_cRCRF1066T and CCLF_cRCRF1050T by PT-2HF4C).
+* 1 run with a sample from a different patient (CCLF_cRCRF1068T by PT-2INIB).
 
 # Goal
 
@@ -18,9 +21,11 @@ The goals of this analysis are:
 * show behaviour of viability over time for untreated and control samples
 * show robustness of sample viability behaviour over time between replicates
 * show similar patterns in compound response for both biological replciates 
-* explore differences in compound response for sample 1047 vs. 1066
-* explore alternative ways to describe drug response, for example by predicting timepoint and drug-concentration from a set of single cells 
-* explore phenotype differences between immune cells and cancer cells in the fluid samples. 
+* explore differences in compound response between samples
+
+This analysis does not:
+* explore alternative & in-depth ways to describe drug response, for example by predicting timepoint and drug-concentration from a set of single cells
+* explore phenotype differences between immune cells and cancer cells in the fluid samples. This data is available for some of the data.
 
 # Metadata
 
