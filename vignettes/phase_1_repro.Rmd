@@ -27,7 +27,7 @@ This analysis does not:
 * explore alternative & in-depth ways to describe drug response, for example by predicting timepoint and drug-concentration from a set of single cells
 * explore phenotype differences between immune cells and cancer cells in the fluid samples. This data is available for some of the data.
 
-# Metadata
+# Details about the imaging run
 
 ## Run: 0000 1204 9003
 
@@ -65,22 +65,68 @@ No layout error during microscopy this time.
 ### Notes 
 Only limited cells during sample processing after depletion. I had to seed cells with limited density at 125k/ml (50% of usual concentration) for section 1 and seeded 100% pure raw cells in section 2. Section 3 remained empty. There were selected pipetting errors in wells $c("K16", "M16", "N13", "N14", "N15", "N16", "P13", "P14", "P15", "P16")$ that have to be excluded later on. 
 
-
 # Data access
 
 ```{r}
 library(tidyverse)
 library(here)
-library(pool)
-library(viridis)
 library(reticulate)
+
+#clustering
 library(umap)
 library(dbscan)
-library(platetools)
+
+#plotting
 library(patchwork)
+library(janitor)
+library(platetools)
+library(viridis)
+
+# database
+library(RPostgres)
+library(pool)
+library(RSQLite)
+library(DBI)
 ```
 
-I access the databases in the S3 bucket for replicate one and two of sample 1047. 
+I access the RDS database. There are two tables that describe the data on the measurement and observation level.
+
+```{r}
+host_db = "biosensor.c9k2hfiwt5mi.us-east-2.rds.amazonaws.com"
+pool <- pool::dbPool(RPostgres::Postgres(),
+                       host = host_db,
+                       dbname = "biosensor",
+                       port = 5432,
+                       user = "biosensor",
+                       password = readLines("~/password.txt"))
+
+db_list_tables(pool)
+measurement <- tbl(pool, "measurement")
+observation <- tbl(pool, "observation")
+```
+
+I load data for files that are relevant in this pilot. 
+
+```{r}
+barcodes <- c(12048703,
+12048903,
+12049003,
+12094903,
+12095103,
+12095203,
+12105403,
+12105803) %>% as.character() %>% 
+  paste0("0000", .)
+
+measurement <- measurement %>% collect() %>% filter(id_barcode %in% barcodes)
+
+measurement %>%
+  write_rds(here("data/measurement.Rds"))
+
+measurement %>%
+  semi_join(observation %>% collect(), .) %>% write_rds(here("data/observation.Rds"))
+```
+
 
 ```{r}
 database_1 <- "~/bucket/data/cellprofiler_000012049003.db"
@@ -95,23 +141,6 @@ pool_2 <- pool::dbPool(RSQLite::SQLite(), dbname = database_2)
 I gain an overview about the databases. 
 
 ```{r}
-db_list_tables(pool_1)
-db_list_tables(pool_2)
-#db_list_tables(pool_3)
-
-# I export the tables into the session
-replicate_1 <- tbl(pool_1, "cells")
-index_1 <- tbl(pool_1, "index")
-
-
-replicate_2 <- tbl(pool_2, "cells")
-index_2 <- tbl(pool_2, "index")
-
-
-# replicate_3 <- tbl(pool_3, "cells")
-# index_3 <- tbl(pool_3, "index")
-# replicate_3_j <- replicate_3 %>% 
-#   left_join(index_3)
 
 ```
 
