@@ -1,0 +1,322 @@
+---
+title: "Library Generation Rapid Biosensor"
+author: 'Niklas Rindtorff CostItem: 5000610'
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  html_notebook:
+    df_print: paged
+    code_folding: hide
+---
+##Specify final assay plate layout
+
+We are going to create a compound library consisting of: 
+
+* 3 sectors 
+* 7 compounds + a negative/positive control
+* 8 concentrations 
+* 2 technical replicates 
+
+First, I am going to design the final layout. Afterwards, I am going to specify a source plate layout that is compatible. 
+Prior approaches, based on using a fixed source concentration and a variable volume turned out to be unfeasable.
+
+```{r, include = FALSE}
+library(platetools)
+library(tidyverse)
+library(here)
+library(magrittr)
+```
+
+
+
+First I define sections that are going to be populated with different cell types.
+
+```{r}
+lib_pre <- tibble(well = num_to_well(1:384, plate = 384)) %>% 
+  separate(well, c("row", "col_pad"), remove = FALSE, sep = 1) %>% 
+  mutate(col = as.numeric(col_pad)) %>%
+  mutate(row = as.character(row),
+         sample = case_when(
+           col %in% c(1:4, 13:16) ~ "CD45+",
+           col %in% c(5:8, 17:20) ~ "CD45-",
+           TRUE ~ "mixture"
+         ))
+  
+
+df = lib_pre
+raw_map(data = df$sample,
+        well = df$well,
+        plate = 384) +
+    ggtitle("cclf_asclib_1910") +
+    theme_dark()
+```
+
+Now I define a vector with 128 elements and a random set of compound identifiers, and concentration factors.
+
+The minimal volume (in Liters) that can be handled by the Echo is: 
+```{r}
+lw <- 2.5E-9
+lw
+```
+
+
+My concentrations/ volumes are going to be: 
+
+```{r}
+vol_well = 60E-6
+dil_fact = 1000
+stock = 10E-3
+
+mid <- vol_well/dil_fact
+
+#fixed-concentration approach
+# conc <- tibble(x = c(1:8),
+#        x2 = 2^x,
+#        fac = x2/32,
+#        vol_l = fac*mid,
+#        dil_fac = vol_l/vol_well,
+#        f_conc_uM = dil_fac*stock*1E6) %>% 
+#   dplyr::select(concentration = x, vol_l, f_conc_uM ) %>% 
+#   mutate(i_conc_mM = 2E-3*1000)
+
+#fixed volume approach
+conc <- tibble(x = c(1:8),
+               f_conc_uM = stock/(2^(x-1))*1000) %>%
+  dplyr::select(concentration = x,  f_conc_uM ) %>%
+  mutate(i_conc_mM = stock*1000)
+
+conc
+```
+
+The default stock concentration is going to be [mM]:
+
+```{r}
+stock*1000
+```
+
+The dispensing volume is going to be [nl]: 
+```{r}
+vol_disp = vol_well/1000
+vol_disp*1E9
+```
+
+
+```{r}
+#test
+#stopifnot(min(conc$vol_l) >=  lw)
+```
+
+
+```{r}
+#I set a seed 
+set.seed(7)
+
+#I define my element
+df <- expand.grid(compound = LETTERS[1:8],
+                  concentration = 1:8,
+                  replicate = 1:2) %>%
+  mutate(compound = ifelse(compound == "H", "CTRL", LETTERS[compound]),
+         compound = ifelse(compound == "CTRL" & concentration %in% c(1:4), "Stauro", compound),
+         compound = ifelse(compound == "CTRL" & concentration %in% c(5:8), "DMSO", compound)) %>% 
+          sample_frac(1) %>% 
+  mutate(concentration = ifelse(compound %in% c("Stauro", "DMSO"), NA, concentration))
+
+```
+
+I merge the sectioned layout with the drug IDs and concentration IDs. This is my final layout.
+
+```{r}
+#I nest items
+lib <- lib_pre %>% 
+  nest(-sample) %>% 
+  #I cbind my 128 element long element, which I define below
+  mutate(new = map(data, ~cbind(.x, df))) %>% 
+  unnest(new) %>% 
+  left_join(conc)
+  
+
+lib %>% dplyr::select(-replicate, -sample)
+```
+
+Here all concentrations are color-coded.
+
+```{r}
+df = lib
+raw_map(data = df$concentration,
+        well = df$well,
+        plate = 384) +
+    ggtitle("cclf_asclib_1910") +
+    theme_dark()
+```
+
+Here all compounds have a unique color.
+
+```{r}
+raw_map(data = df$compound,
+        well = df$well,
+        plate = 384) +
+    ggtitle("cclf_asclib_1910") +
+    theme_dark()
+```
+
+Finally, I export an Excel file with details for the final assay plate: location, source and volume.
+
+```{r}
+lib %>% 
+  dplyr::select(-replicate, -sample) %>% 
+  write_excel_csv("cclf_ascites_1910.csv")
+```
+
+##Specify source plate 
+
+The source plate for the Echo system will follow a **B40** layout with the following modifications: 
+
+* I will only test 7 compounds instead of 40. A large fraction of wells will be empty/ filled with DMSO
+* I will dispense both DMSO and Water based compound. Thus, I will need two source plates!
+* The control compounds are in the first two columns of the DMSO source plate
+
+```{r}
+#knitr::include_graphics(here("book/local_data/b40.png"))
+```
+
+```{r}
+source_plate <- expand.grid(c("A03", "A13", "A04", "A14", "B03", "B13", "B04", "B14") %>% 
+              substr(., 2,3) %>% unique(),
+              LETTERS[1:14]) %>%
+  set_colnames(c("source_col", "source_row")) %>%
+  cbind(compound = rep(c(LETTERS[1:7]), each = 8)) %>%
+  cbind(concentration = rep(c(1:8), times = 7)) %>%
+  mutate(source_well = paste0(source_row, source_col)) %>%
+  mutate(solvent = if_else(compound == "G", "H20_based", "DMSO_based")) %>% 
+  dplyr::select(-source_col, -source_row) %>%
+  #Now I need to add a column for negative and positive controls.
+  rbind(., expand.grid(source_col = c("01","02"),
+                      source_row = LETTERS[1:16]) %>% 
+          mutate(source_well = paste0(source_row, source_col)) %>%
+          mutate(compound = if_else(source_col == "02", "DMSO", "Stauro")) %>% 
+          mutate(concentration = NA) %>% 
+          mutate(solvent = "DMSO_based") %>% 
+          dplyr::select(-source_col, -source_row))
+  
+source_plate
+```
+
+Below I plot the layout for the two source plates: 
+* Source plate "DMSO"
+* Source plate "H20"
+
+First Source plate "DMSO"
+
+```{r}
+df <- source_plate %>% filter(solvent == "DMSO_based")
+
+raw_map(data = df$compound,
+        well = df$source_well,
+        plate = 384) +
+    ggtitle("Source plate DMSO") +
+    theme_dark()
+```
+
+Dark values correspond to high concentrations of the drug.
+
+```{r, warning=FALSE}
+df <- source_plate %>% filter(solvent == "DMSO_based")
+
+raw_map(data = df$concentration,
+        well = df$source_well,
+        plate = 384) +
+    ggtitle("Source plate DMSO") +
+    theme_dark()
+```
+
+Now the Source plate H20: 
+
+```{r, warning=FALSE}
+df <- source_plate %>% filter(solvent == "H20_based")
+
+raw_map(data = df$compound,
+        well = df$source_well,
+        plate = 384) +
+    ggtitle("Source plate H20") +
+    theme_dark()
+```
+
+```{r}
+df <- source_plate %>% filter(solvent == "H20_based")
+
+raw_map(data = df$concentration,
+        well = df$source_well,
+        plate = 384) +
+    ggtitle("Source plate H20") +
+    theme_dark()
+```
+
+##Add artificial concentrations to controls 
+
+In order to not have one control be sourced from multiple wells, I have to randomly assign control wells to source wells using concentration identifiers. 
+
+```{r}
+#set.seed(13)
+
+source_plate <- source_plate %>% 
+  filter(compound %in% c("Stauro", "DMSO")) %>% 
+  arrange(compound) %>%
+  dplyr::select(-concentration) %>% 
+  cbind(., concentration = rep(c(1:16), times = 2)) %>% 
+  rbind(source_plate %>% 
+  filter(!compound %in% c("Stauro", "DMSO")))
+  
+  
+lib <- lib %>% 
+  filter(compound %in% c("Stauro", "DMSO")) %>% 
+  arrange(compound) %>%
+  dplyr::select(-concentration) %>% 
+  cbind(., concentration = rep(c(1:16, 1:8), times = 2)) %>% 
+  rbind(lib %>% 
+  filter(!compound %in% c("Stauro", "DMSO")))
+
+```
+
+
+##Create final worklists
+
+The chunk return three "1" statements
+
+```{r}
+df <- lib %>% 
+  dplyr::select(-(row:col))%>%
+  left_join(.,source_plate %>% mutate(compound = as.character(compound)), by = c("compound", "concentration")) %>%
+  mutate(volume_nl = vol_disp*1E9) %T>%
+  write.csv("cclf_ascites_0611_complete_worklist.csv") %>% 
+  dplyr::select(destination_well = well, source_well, solvent, volume_nl)
+
+df %>% count(destination_well) %>% 
+  .$n %>% max()
+  
+
+df %>%
+  filter(solvent == "DMSO_based") %>%
+  dplyr::select(-solvent) %T>%
+  write.csv("cclf_ascites_0611_dmso_worklist.csv") %>% 
+  count(destination_well) %>% 
+  .$n %>% max()
+
+df %>% 
+  filter(solvent == "H20_based") %>%
+  dplyr::select(-solvent) %T>%
+  write.csv("cclf_ascites_0611_h20_worklist.csv") %>% 
+  count(destination_well) %>% 
+  .$n %>% max()
+```
+
+Writing the source file. 
+
+```{r}
+source_plate %>% write_csv("source_plate_anno.csv")
+```
+
+
+##Final comments
+
+* I will provide ~ 1ml of each compound (new order)

@@ -8,6 +8,33 @@ knitr::opts_chunk$set(echo = TRUE,
                       cache = TRUE)
 ```
 
+Loading packages
+
+```{r}
+library(tidyverse)
+library(reticulate)
+library(lubridate)
+
+#clustering
+library(umap)
+library(dbscan)
+
+#plotting
+library(patchwork)
+library(janitor)
+library(platetools)
+library(viridis)
+
+# database
+library(RPostgres)
+library(pool)
+library(RSQLite)
+library(DBI)
+
+library(here)
+library(googlesheets4)
+```
+
 # Introduction
 
 This vignette comprises 6 drug screens that were performed in 2019. The data contains the following experiments: 
@@ -37,7 +64,6 @@ This analysis does not:
 * *drug perturbation:* performed
 * *imaging protocol:* high_intensity_6h
 
-### Notes 
 Regular 2/3 layout with pure and mixed population. 
 **Layout Error:** plate was in the wrong order during imaging - with 180 degrees - CCLF barcode facing to wall because it was moved. This was 100% the case for imaging runs on the 31-1-19 and 01-02-19. This is most probably true for the runs on the days before.
 
@@ -50,7 +76,6 @@ Regular 2/3 layout with pure and mixed population.
 * *drug perturbation:* performed
 * *imaging protocol:* high_intensity_6h
 
-### Notes
 Regular 2/3 layout with pure and mixed population. 
 No layout error during microscopy this time.
 
@@ -62,32 +87,9 @@ No layout error during microscopy this time.
 * *drug perturbation:* performed
 * *imaging protocol:* high_intensity_6h
 
-### Notes 
 Only limited cells during sample processing after depletion. I had to seed cells with limited density at 125k/ml (50% of usual concentration) for section 1 and seeded 100% pure raw cells in section 2. Section 3 remained empty. There were selected pipetting errors in wells $c("K16", "M16", "N13", "N14", "N15", "N16", "P13", "P14", "P15", "P16")$ that have to be excluded later on. 
 
 # Data access
-
-```{r}
-library(tidyverse)
-library(here)
-library(reticulate)
-
-#clustering
-library(umap)
-library(dbscan)
-
-#plotting
-library(patchwork)
-library(janitor)
-library(platetools)
-library(viridis)
-
-# database
-library(RPostgres)
-library(pool)
-library(RSQLite)
-library(DBI)
-```
 
 I access the RDS database. There are two tables that describe the data on the measurement and observation level.
 
@@ -121,67 +123,329 @@ barcodes <- c(12048703,
 measurement <- measurement %>% collect() %>% filter(id_barcode %in% barcodes)
 
 measurement %>%
-  write_rds(here("data/measurement.Rds"))
+  write_rds(here::here("data/measurement.Rds"))
 
-measurement %>%
-  semi_join(observation %>% collect(), .) %>% write_rds(here("data/observation.Rds"))
+# keeps breaking the instance, too much data. 
+# measurement %>%
+#   semi_join(observation %>% collect(), .) %>% write_rds(here("data/observation.Rds"))
 ```
 
+# Treatment annotation
+
+I also load the drug library annotation file (Be aware that the column "alias" in the Kekule registration is misleading. It does nor represent the actual abbreviation/ treatment identity).
+
+```{r, message=FALSE}
+# Reading the compound submission file but ignoring the manual ID
+plate_anno <- read_delim(here::here("data/annotation/20181016105007_registered_7296_NRindtorff_registration_Kekule.txt"), "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
+  # Using the Broad ID
+  select(broad_sample = Broad_external_Id, compound_name) %>% 
+  # Reading the annotation of the source plate for DMSO 
+  left_join(read_delim(here::here("data/annotation/S-C-7296-01-B40-002.txt"), 
+      "\t", escape_double = FALSE, trim_ws = TRUE) %>% select(well_position, 
+                                                              broad_sample, 
+                                                              mmoles_per_liter) %>% 
+        drop_na() %>% 
+        # Reading the annotation of the source plate H20
+        rbind(.,read_delim(here::here("data/annotation/S-C_7296_01_B40_003.txt"), 
+      "\t", escape_double = FALSE, trim_ws = TRUE) %>% select(well_position, 
+                                                              broad_sample, 
+                                                              mmoles_per_liter) %>% drop_na()), ., 
+      # Joining by broad_id
+      by = "broad_sample") %>%
+  
+  # Reading the annotation of the robot worklist that links source plate to destination plate
+  left_join(read_csv(here::here("data/annotation/cclf_ascites_1910_complete_worklist.csv")) %>% 
+    select(destination_well = well, well_position = source_well)) %>% 
+  # Adding 0.1% DMSO wells
+  select(-well_position, well = destination_well) %>%
+  left_join(tibble(well = platetools::num_to_well(1:384, plate = 384)), .) %>% 
+  mutate(broad_sample = if_else(is.na(broad_sample), "DMSO", broad_sample), 
+         compound_name = if_else(is.na(compound_name), "DMSO", compound_name),
+         mmoles_per_liter = if_else(is.na(mmoles_per_liter), 0, mmoles_per_liter)) %>% 
+  mutate(compound_name = if_else(compound_name == "Boretzomib", "Bortezomib", compound_name),
+         compound_name = if_else(compound_name == "Pembrolizumab", "H20/Pembrolizumab", compound_name)) %>%
+  # I add section information
+  mutate(row = substr(well, 1, 1) %>% match(., LETTERS),
+         col = substr(well, 2, 3) %>% as.numeric()) %>%
+  mutate(section = case_when(col %in% c(1:4, 13:16) ~ 1,
+                             col %in% c(5:8, 17:20) ~ 2,
+                             col %in% c(9:12, 21:24) ~ 3))
+
+# I write the library annotation file. 
+write_csv(plate_anno, here::here("data/annotation/cclf_ascites_1910_human_readable.csv"))
+```
+
+I plot the complete library. 
 
 ```{r}
-database_1 <- "~/bucket/data/cellprofiler_000012049003.db"
-database_2 <- "~/bucket/data/cellprofiler_000012048903.db"
-#database_3
-
-pool_1 <- pool::dbPool(RSQLite::SQLite(), dbname = database_1)
-pool_2 <- pool::dbPool(RSQLite::SQLite(), dbname = database_2)
-#pool_3 <- pool::dbPool(RSQLite::SQLite(), dbname = database_3)
+df <- plate_anno
+raw_map(data = df$compound_name,
+        well = df$well,
+        plate = 384) +
+    ggtitle("cclf_ascites_1910") +
+    scale_fill_brewer(type = "qual", palette = 2) +
+    theme_dark()
 ```
 
-I gain an overview about the databases. 
-
-```{r}
-
-```
-
-I also load the drug library annotation file. 
-
-```{r, message=FALSE, warning=FALSE}
-plate_anno <- read_delim("~/bucket/annotation/20181016105007_registered_7296_NRindtorff_registration_Kekule.txt", 
-    "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
-  dplyr::select(compound = alias, compound_name, concentration_value = concentration) %>%
-  rbind(tibble(compound = "DMSO", compound_name = "DMSO", concentration_value = NA)) %>%
-  left_join(., read_csv("~/bucket/annotation/cclf_ascites_1910.csv")) %>% 
-  dplyr::select(well, compound_name, compound, concentration, concentration_value)
-```
-
-Now I need to annotate the plate. 
-
-```{r, eval = FALSE}
-# First I create a table with more interpretable identifiers, that I can use to filter the dataset. 
-# I use this chunk to create an index table for each database. I should incorporate that into the script.
-index_1 <- replicate_1 %>%
-  dplyr::select(id, object_number, image_number) %>% 
-  collect() %>%
-  separate(id, c("id_a", "id_b", "id_c", "id_d", "time", "well", "field", "channel"), 
-           sep = "-", remove = FALSE) %>% 
-  unite(plate, c("id_a", "id_b", "id_c", "id_d"))
-
-copy_to(pool_1, index_1, "index",
-  overwrite = TRUE,
-  temporary = FALSE)
-
-index_1 <- tbl(pool_1, "index")
-```
-
-## Time imputation 
+# Missing Data
 
 In order to more realisitically understand the way cells behave over time, we need to annotate timepoints with a real world time equivalent. We do so using by using the estimated protocol time and inferring the time after the start of the experiment, so that well A01 at timepoint 1 has a different real world time that well P24 at timepoint 1.
+
+Because we do not have access to the exact file creation dates, we take an easy way out in which we are extrapolating the well wise acquisition time for each imaging run. This is complicated by the fact, that not every plate was completely imaged and not every protocol was exactly the same. In the future it would be best to have a protocol to write the file creation date for a whole directory into a .txt file that can then be uploaded to AWS S3.
+
+I pull the plate layouts for every processed plate. 
+
+```{r}
+df <- measurement %>% 
+  unite(run, measurement_no, iteration_no, remove = FALSE) %>%
+  select(run, id_barcode, measurement_no,well) %>% 
+  mutate(row = substr(well, 1, 1) %>% match(., LETTERS[16:1]),
+         col = substr(well, 2, 3) %>% as.numeric()) %>% 
+  mutate(status = 1)
+
+df %>%
+  ggplot(aes(col, row, fill = row)) + 
+  geom_tile() + 
+  scale_fill_viridis_c() +
+  facet_grid(run~id_barcode) + 
+  ggtitle("Imaged wells during pilot phase, not-corrected") + 
+  theme_classic() #+
+  #theme(axis.text.x = element_blank()) + 
+  #theme(axis.text.y = element_blank())
+```
+
+I need to manually change the following: 
+* rename imaging runs for *000012048703*
+* rename order of imaging runs for *000012049003*
+
+Also, I recognize that some data is missing. There are 3 possible explainations
+* Data was never intended to be measured
+* Data was accidently not measured
+* Data was not uploaded
+* Data was not indexed
+* Data was not processed
+* There were no observations for a given measurement
+
+I am running two system commands to track sources of missing data. I list all files in our inbox directory and the flatfield directory. These are big files.
+
+```{r, eval = FALSE}
+system("aws s3 ls s3://ascstore/flatfield/ --recursive | awk '/IdentifySecondaryObjects.csv/' > ~/rapid/result_filelist.txt")
+system("aws s3 ls s3://ascstore/metadata/ --recursive | awk '/.json/' > ~/rapid/metadata_filelist.txt")
+system("aws s3 ls s3://ascstore/inbox/ --recursive > ~/rapid/inbox_filelist.txt")
+```
+
+I perform a double check and filter both results, metadata and raw data in the inbox.
+
+```{r}
+missing_result_files <- read_table2(here::here("result_filelist.txt"), 
+    col_names = FALSE) %>% magrittr::set_colnames(c("date", "time", "size", "path")) %>% 
+  mutate(id_observation = str_extract(path, pattern = "0000\\d+__\\d+-\\d\\d-\\d+T\\d+_\\d+_\\d+-Measurement_\\d-sk\\d-...-f..-ch\\d")) %>% 
+  #mutate(size_filter = if_else(size < quantile(.99, size, na.rm = TRUE))) %>%
+  anti_join(measurement %>% select(id_observation)) %>% 
+  filter(size < 1000000) #>99% of all filesizes generally observed
+
+nrow(missing_result_files)
+```
+
+No result files that have been generated are missing in our measurement overview.
+Next, I check the available metadata for completeness.
+
+
+```{r}
+missing_metadata_files <- read_table2(here::here("metadata_filelist.txt"), 
+    col_names = FALSE) %>% magrittr::set_colnames(c("date", "time", "size", "path")) %>% 
+  mutate(id_measurement = str_extract(path, pattern = "0000\\d+__\\d+-\\d\\d-\\d+T\\d+_\\d+_\\d+-Measurement_\\d")) %>%
+  mutate(id_barcode = str_extract(path, pattern = "0000\\d+"),
+         channel = str_extract(path, pattern = "_[a-z][a-z]_") %>% substr(2,3),
+         well = str_extract(path, pattern = "[A-Z]\\d+.json") %>% substr(1,3)) %>% 
+  # only keeping barcodes I am interested in
+  filter(id_barcode %in% barcodes) %>%
+  #count(id_measurement, well) %>% 
+  anti_join(measurement %>% select(id_measurement, well, id_barcode) %>% distinct()) %>% 
+  left_join(measurement %>% select(id_measurement, contains("no")) %>% distinct())
+
+missing_metadata_files %>% arrange(id_measurement, well, channel) %>% 
+  select(id_measurement, well, channel) %>% 
+  count(channel)
+```
+
+It turns out that missing measurements jobs only exist for 3 of the 4 job .json files available. The phase contrast jobs were mostly processed and generated a report! I believe this is due to the systems function, but will have to check in detail.
+
+```{r}
+inbox_files <- read_table2(here::here("inbox_filelist.txt"), 
+    col_names = FALSE) %>% magrittr::set_colnames(c("date", "time", "size", "path")) %>% 
+  mutate(id_measurement = str_extract(path, pattern = "0000\\d+__\\d+-\\d\\d-\\d+T\\d+_\\d+_\\d+-Measurement_\\d")) %>% 
+  mutate(row = str_extract(path, pattern = "r\\d+") %>% substr(2,3) %>% as.numeric() %>% LETTERS[.],
+         col = str_extract(path, pattern = "c\\d+") %>% substr(2,3),
+         well = paste0(row, col),
+         channel = str_extract(path, pattern = "ch\\d")) %>% 
+  filter(well != "NANA")
+
+missing_inbox_files <- inbox_files %>% 
+  distinct(id_measurement, well, channel) %>% arrange(id_measurement, well) %>%
+  # extracting the barcode
+  mutate(id_barcode = str_extract(id_measurement, pattern = "0000\\d+")) %>% 
+  # only keeping barcodes I am interested in
+  filter(id_barcode %in% barcodes) %>%
+  anti_join(measurement %>% select(id_measurement, well, id_barcode) %>% distinct()) %>%
+  # adding some handy metadata for plotting
+  left_join(measurement %>% select(id_measurement, id_barcode, contains("no")) %>% distinct()) 
+
+missing_inbox_files %>% arrange(id_measurement, well, channel) %>% 
+  select(id_measurement, well, channel) %>% 
+  count(channel)
+```
+
+I plot the files on both the inbox and metadata level that have not been processed yet. Note, however, that a larger portion of expected files simply does not exist on AWS S3! 
+
+```{r}
+df <- missing_inbox_files %>% 
+  mutate(source = "inbox") %>%
+  rbind(missing_metadata_files %>% select(id_measurement:iteration_no) %>% mutate(source = "metadata")) %>%
+  unite(run, measurement_no, iteration_no, remove = FALSE) %>%
+  count(run, id_barcode, measurement_no,well, source) %>% 
+  mutate(row = substr(well, 1, 1) %>% match(., LETTERS[26:1]),
+         col = substr(well, 2, 3) %>% as.numeric()) %>% 
+  filter(!(source == "inbox" & n != 4))
+
+df %>%
+  #filter(source == "inbox") %>%
+  ggplot(aes(col, row, fill = source)) + 
+  geom_tile(alpha = 0.7) + 
+  scale_fill_brewer(type = "qual") +
+  facet_grid(run~id_barcode) + 
+  ggtitle("Missing wells that have been imaged during pilot phase") + 
+  theme_classic() +
+  theme(axis.text.x = element_blank()) + 
+  theme(axis.text.y = element_blank()) + 
+  theme(legend.position = "bottom") + 
+  labs(fill = "Number of channels available in inbox")
+```
+
+Based on this analysis, I conclude: 
+* Most missing images for 000012094903 were not completely uploaded, they are simply missing. 
+* Some (visible in the plot above) missing images for 000012094903 were uploaded, but never registered during metadata generation. This might be an issue with s3fs. 
+* Missing images for 000012048903 were uploaded, exist in the inbox, are complete and were registered but never processed. This might be an issue with the cluster at some point.
+
+In order to collect data for these missing wells, I will need to re-generate metadata for selected plates and resubmit processing jobs. I focus on 000012048903 as this is the biggest possible gain vs. input relationship. 
+
+# Data Filtering
+
+I extract the starting time for each plate using the exact timestamp. 
+
+```{r}
+measurement <- measurement %>% 
+  # I drop NA entries, they are corrupted
+  drop_na() %>%
+  mutate(measurement_no = if_else(id_barcode == "000012048703" & measurement_no == 4, 2, measurement_no)) %>% 
+  mutate(measurement_no = if_else(id_barcode == "000012048703" & measurement_no == 6, 3, measurement_no)) %>% 
+  # extracting date
+  mutate(date = str_extract(string = id_measurement, pattern = "20\\d\\d-\\d\\d-\\d\\dT\\d\\d_\\d\\d_\\d\\d") %>% 
+           str_replace(pattern = "T", replacement = "-") %>% lubridate::ymd_hms())
+  
+```
+
+Not every sample has 3 measurments on subsequent days. It will be hard to compare them. For now I build the analysis in a way that is only focused on the wall-clock imaging time.
+
+```{r}
+measurement %>% 
+  select(id_barcode, date, measurement_no) %>% distinct() %>% arrange(date)
+```
+
+I fix some measurment_no indicators.
+
+```{r}
+measurement = measurement %>% 
+  mutate(measurement_no = case_when(id_barcode == "000012049003" & date == ymd_hms("2019-01-28 21:02:07") ~ 1,
+                                    id_barcode == "000012049003" & date == ymd_hms("2019-01-29 19:11:28") ~ 2,
+                                    id_barcode == "000012049003" & date == ymd_hms("2019-01-31 18:40:09") ~ 3,
+                                    id_barcode == "000012049003" & date == ymd_hms("2019-02-01 12:09:07") ~ 4,
+                                    TRUE ~ measurement_no))
+```
+
+I plot the plate layout again.
+
+```{r}
+df <- measurement %>% 
+  unite(run, measurement_no, iteration_no, remove = FALSE) %>%
+  select(run, id_barcode, measurement_no,well) %>% 
+  mutate(row = substr(well, 1, 1) %>% match(., LETTERS[26:1]),
+         col = substr(well, 2, 3) %>% as.numeric()) %>% 
+  mutate(status = 1)
+
+df %>%
+  ggplot(aes(col, row)) + 
+  geom_tile(color = "black") + 
+  facet_grid(run~id_barcode) + 
+  ggtitle("Imaged wells during pilot phase, corrected") + 
+  theme_classic() +
+  theme(axis.text.x = element_blank()) + 
+  theme(axis.text.y = element_blank())
+```
+
+# Time imputations
+
+I impute time based on the following assumptions: 
+* the measurement timepoint in the barcode reflects the time when a measurement was started
+* there is a constant time that is needed for well completion
+* each measurement starts at well P01 and ends at well A24
+* in some cases, measurement protocols have implemented a waiting time between each imaging round (multiple imaging rounds per measurement with a t>0s gap between the rounds. I don't think this is a good idea, but it has been done.) 
+
+I manually annotate the imaging protocols for each plate in our dataset.
+
+```{r}
+anno <- tibble(id_barcode = barcodes[1:3],
+       library = "XXXX_2018/11/06",
+       protocol = "ascites_mush_40x_mito_fitc_singlecell_z-2_lowerexp_fullplate_6h") %>% 
+rbind(tibble(id_barcode = barcodes[4:6],
+       library = "9375_2019/04/03",
+       protocol = "ascites_mush_40x_mito_fitc_singlecell_z-2_lowerexp_fullplate_6h_with_break")) %>% 
+  cbind(line = c("CCLF_cRCRF1066T",
+                 "CCLF_cRCRF1047T",
+                 "CCLF_cRCRF1047T",
+                 "CCLF_cRCRF1047T",
+                 "CCLF_cRCRF1050T",
+                 "CCLF_cRCRF1068T"))
+
+```
+
+I now create a manual well-wise annotation file for every barcode & measurement using the plate annotation as the basis.
+
+```{r}
+measurement %>% select(contains("id"), well, date, contains("_no")) %>% select(-contains("observation")) %>% 
+  distinct() %>% left_join(plate_anno) %>% 
+    mutate(row = substr(well, 1, 1) %>% match(., LETTERS),
+         col = substr(well, 2, 3) %>% as.numeric()) %>%
+  # joining anno file and formatting annotation according to the written/online documentation
+  mutate(sample = case_when(id_barcode == "000012048703" & section == 1 ~ "CD45-",
+                            id_barcode == "000012048703" & section == 2 ~ "raw",
+                            id_barcode == "000012048703" & section == 2 ~ "empty",
+                            # next plate
+                            id_barcode == "000012048903" & section %in% c(1,2) ~ "CD45-",
+                            id_barcode == "000012048903" & section == 3 ~ "CD45-_raw_1:1",
+                            # next plate
+                            id_barcode == "000012049003" & section %in% c(1,2) ~ "CD45-",
+                            id_barcode == "000012049003" & section == 3 ~ "CD45-_raw_1:1",
+                            # next plate, processing Mushriq's
+                            id_barcode == "000012094903" & section %in% c(1,2) ~ "CD45-",
+                            id_barcode == "000012094903" & section == 3 ~ "empty",
+                            # next plate
+                            id_barcode == "000012094903" & section %in% c(1,2) ~ "CD45-",
+                            id_barcode == "000012094903" & section == 3 ~ "empty",
+                            
+                            
+         flag = case_when(id_barcode == "000012048703" & well %in% c("K16", "M16", "N13", "N14", 
+                                                                     "N15", "N16", "P13", "P14", "P15", "P16") ~ TRUE,
+                          
+                          TRUE ~ FALSE)
+           
+```
+
 
 ```{r}
 library(lubridate)
 s_per_plate <- hms("6:37:23") %>% lubridate::seconds() %>% as.numeric()
-s_per_well <- time_per_plate/384
+s_per_well <- s_per_plate/384 #time_per
 s_measurment_interval <- hms("24:00:00") %>% lubridate::seconds() %>% as.numeric()
 
 time_layout <- tibble(row = rep(c(LETTERS[c(16:1)], LETTERS[c(1:16)]), times = 12),
@@ -195,7 +459,7 @@ time_layout <- tibble(row = rep(c(LETTERS[c(16:1)], LETTERS[c(1:16)]), times = 1
 raw_map(data = time_layout$well_time,
         well = time_layout$well,
         plate = 384) +
-    ggtitle("Time layout for 2*6h lowint z-2 protocol used") +
+    ggtitle("Time layout for imaging protocol") +
     theme_dark() +
     scale_fill_viridis()
 ```
