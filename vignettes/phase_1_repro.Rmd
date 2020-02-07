@@ -271,7 +271,7 @@ missing_metadata_files %>% arrange(id_measurement, well, channel) %>%
 
 It turns out that missing measurements jobs only exist for 3 of the 4 job .json files available. The phase contrast jobs were mostly processed and generated a report! I believe this is due to the systems function, but will have to check in detail.
 
-```{r}
+```{r, eval = FALSE}
 inbox_files <- read_table2(here::here("inbox_filelist.txt"), 
     col_names = FALSE) %>% magrittr::set_colnames(c("date", "time", "size", "path")) %>% 
   mutate(id_measurement = str_extract(path, pattern = "0000\\d+__\\d+-\\d\\d-\\d+T\\d+_\\d+_\\d+-Measurement_\\d")) %>% 
@@ -291,6 +291,12 @@ missing_inbox_files <- inbox_files %>%
   # adding some handy metadata for plotting
   left_join(measurement %>% select(id_measurement, id_barcode, contains("no")) %>% distinct()) 
 
+saveRDS(missing_inbox_files, here::here("data/missing_inbox_files.Rds"))
+```
+
+
+```{r}
+missing_inbox_files <- readRDS(here::here("data/missing_inbox_files.Rds"))
 missing_inbox_files %>% arrange(id_measurement, well, channel) %>% 
   select(id_measurement, well, channel) %>% 
   count(channel)
@@ -394,30 +400,40 @@ I impute time based on the following assumptions:
 I manually annotate the imaging protocols for each plate in our dataset.
 
 ```{r}
-anno <- tibble(id_barcode = barcodes[1:3],
+barcode_anno <- tibble(id_barcode = barcodes[1:3],
        library = "XXXX_2018/11/06",
-       protocol = "ascites_mush_40x_mito_fitc_singlecell_z-2_lowerexp_fullplate_6h") %>% 
+       protocol = "ascites_mush_40x_mito_fitc_singlecell_z-2_lowerexp_fullplate_6h",
+       confocal = FALSE,
+       pause = FALSE) %>% # pause indicates wether or not the microscope took a forced break during acquisition. I don't think this is a good thing, but we introduced it when the confocal protocol turned out to be faster than others. We will get rid of it in the future. 
 rbind(tibble(id_barcode = barcodes[4:6],
        library = "9375_2019/04/03",
-       protocol = "ascites_mush_40x_mito_fitc_singlecell_z-2_lowerexp_fullplate_6h_with_break")) %>% 
-  cbind(line = c("CCLF_cRCRF1066T",
+       protocol = "ascites_mush_40x_mito_fitc_singlecell_z-2_lowerexp_fullplate_6h_with_break",
+       confocal = TRUE,
+       pause = TRUE)) %>% 
+  cbind(sample = c("CCLF_cRCRF1066T",
                  "CCLF_cRCRF1047T",
                  "CCLF_cRCRF1047T",
                  "CCLF_cRCRF1047T",
                  "CCLF_cRCRF1050T",
-                 "CCLF_cRCRF1068T"))
+                 "CCLF_cRCRF1068T")) %>% 
+  left_join(read_csv(here::here("data/CCLF Ascites Samples - biosensor_cohort.csv")) %>% 
+  select(sample, patient_id))
+
 
 ```
 
 I now create a manual well-wise annotation file for every barcode & measurement using the plate annotation as the basis.
 
 ```{r}
-measurement %>% select(contains("id"), well, date, contains("_no")) %>% select(-contains("observation")) %>% 
-  distinct() %>% left_join(plate_anno) %>% 
+anno <- measurement %>% select(contains("id"), well, date, contains("_no")) %>% 
+  select(-contains("observation")) %>% 
+  distinct() %>% 
+  left_join(plate_anno) %>% 
+  left_join(barcode_anno) %>%
     mutate(row = substr(well, 1, 1) %>% match(., LETTERS),
          col = substr(well, 2, 3) %>% as.numeric()) %>%
   # joining anno file and formatting annotation according to the written/online documentation
-  mutate(sample = case_when(id_barcode == "000012048703" & section == 1 ~ "CD45-",
+  mutate(content = case_when(id_barcode == "000012048703" & section == 1 ~ "CD45-",
                             id_barcode == "000012048703" & section == 2 ~ "raw",
                             id_barcode == "000012048703" & section == 2 ~ "empty",
                             # next plate
@@ -426,350 +442,378 @@ measurement %>% select(contains("id"), well, date, contains("_no")) %>% select(-
                             # next plate
                             id_barcode == "000012049003" & section %in% c(1,2) ~ "CD45-",
                             id_barcode == "000012049003" & section == 3 ~ "CD45-_raw_1:1",
-                            # next plate, processing Mushriq's
+                            # next plate, processing Mushriq's - need confirmation
                             id_barcode == "000012094903" & section %in% c(1,2) ~ "CD45-",
                             id_barcode == "000012094903" & section == 3 ~ "empty",
                             # next plate
-                            id_barcode == "000012094903" & section %in% c(1,2) ~ "CD45-",
-                            id_barcode == "000012094903" & section == 3 ~ "empty",
-                            
-                            
-         flag = case_when(id_barcode == "000012048703" & well %in% c("K16", "M16", "N13", "N14", 
+                            id_barcode == "000012095103" & section %in% c(1,2) ~ "CD45-",
+                            id_barcode == "000012095103" & section == 3 ~ "empty",
+                            # next plate - needs confirmation by Mushriq
+                            id_barcode == "000012095203" & section %in% c(1,2, 3) ~ "CD45-"),
+          flag = case_when(id_barcode == "000012048703" & well %in% c("K16", "M16", "N13", "N14", 
                                                                      "N15", "N16", "P13", "P14", "P15", "P16") ~ TRUE,
                           
-                          TRUE ~ FALSE)
-           
+                          TRUE ~ FALSE)) %>% 
+  # changing the library H20/Pembolizumab acc. to the library status. 
+  mutate(compound_name = if_else(compound_name == "H20/Pembrolizumab", "H20", compound_name)) %>%
+  
+  # Now I also add the imaging times. What matters, is the time per well that is spend per protocol. We can estimate that number based on the hand-written protocols and logs from the Opera microscope.
+  mutate(time_per_plate = case_when(confocal == FALSE ~ hms("6:37:23") %>% lubridate::seconds() %>% as.numeric(),
+                                    confocal == TRUE ~ hms("4:49:23") %>% lubridate::seconds() %>% as.numeric()),
+         time_per_well = time_per_plate/384)
 ```
 
+I will add this table to the database later on. I visualize the database layout.
+
+```{r, eval = FALSE}
+s_query <- datamodelr::dm_re_query("postgres")
+dm_biosensor <- dbGetQuery(pool, s_query) 
+
+dm_biosensor <- datamodelr::as.data_model(dm_biosensor)
+
+graph <- datamodelr::dm_create_graph(dm_biosensor, rankdir = "RL")
+datamodelr::dm_render_graph(graph)
+```
+
+Now I estimate the exact imaging time for each well based on the *time_per_well* feature and the device-specific order of imaging.
+First, I define the a layout of the device-specific imaging order.
 
 ```{r}
-library(lubridate)
-s_per_plate <- hms("6:37:23") %>% lubridate::seconds() %>% as.numeric()
-s_per_well <- s_per_plate/384 #time_per
-s_measurment_interval <- hms("24:00:00") %>% lubridate::seconds() %>% as.numeric()
-
-time_layout <- tibble(row = rep(c(LETTERS[c(16:1)], LETTERS[c(1:16)]), times = 12),
+# I define a layout of the device-specific order of imaging.
+measurement_layout <- tibble(row = rep(c(LETTERS[c(16:1)], LETTERS[c(1:16)]), times = 12),
        col = rep(c(1:24), each = 16)) %>% 
   mutate(col = str_pad(col, 2, side = "left", pad = "0"),
          well = paste0(row, col),
-         index = 1:384,
-         time = index*s_per_well) %>% 
-  dplyr::select(well, well_time = time)
+         index = 1:384) %>% 
+  dplyr::select(well, index)
 
-raw_map(data = time_layout$well_time,
-        well = time_layout$well,
+df <- measurement_layout
+
+raw_map(data = df$index,
+        well = df$well,
         plate = 384) +
     ggtitle("Time layout for imaging protocol") +
     theme_dark() +
     scale_fill_viridis()
 ```
 
-## Cell seeding
-
-Now we want to apply this time scheme over the different timepoints. I also add the cell seeding pattern to the plate, which is unique for most plates. 
+Now I combine the layout with the *time_per_well* estimates. 
 
 ```{r}
-index_1 <- index_1 %>%
-  collect() %>%
-  # cleaning timepoint names
-  mutate(time_day = stringr::str_sub(plate, -1, -1) %>% as.numeric(),
-         time_point = time_day*2,
-         time_point = if_else(time == "sk1", time_point-1, time_point)) %>%
-  # this module defines the additional time in seconds added per plate
-  mutate(add_time = if_else(time_point %% 2 == 0, s_per_plate, 0),
-         add_time = add_time + (time_day-1)*s_measurment_interval) %>%
-  left_join(time_layout) %>% 
-  mutate(real_time = well_time + add_time) %>%
-  # seeding pattern 
-  mutate(col = substr(well, 2, 3)) %>% 
-  mutate(col = as.numeric(col),
-         cell = case_when(col %in% c(1:8, 13:20) ~ "cd45_minus",
-                          col %in% c(9:12, 21:24) ~ "cd45_minus_raw_mix")) %>% 
-  # adding replicate anno 
-  mutate(replicate = if_else(grepl(pattern = "12048903", plate), 2, 1))
+anno_w_time <- anno %>% 
+  left_join(measurement_layout , by = "well") %>% 
+  arrange(id_barcode, measurement_no, iteration_no, index) %>% 
+  group_by(id_barcode, measurement_no) %>%
+  mutate(time = cumsum(time_per_well)) %>% 
+  arrange(id_barcode, measurement_no, iteration_no, index) %>% 
+  # adding a the break time for some plates
+  mutate(time = if_else(iteration_no == 2 & pause == TRUE, time + (6*3600-time_per_plate), time)) %>% 
+  mutate(date = date + seconds(time)) %>%
+  # overwritinig time to be the relative absolute number of hours since the very first well. 
+  group_by(id_barcode) %>% 
+  mutate(time = date - min(date),
+         time = as.numeric(time),
+         time = time/3600) # converting to hours. 
+  
+```
 
-index_2 <- index_2 %>%
-  collect() %>%
-  # cleaning timepoint names
-  mutate(time_day = stringr::str_sub(plate, -1, -1) %>% as.numeric(),
-         time_point = time_day*2,
-         time_point = if_else(time == "sk1", time_point-1, time_point)) %>%
-  # this module defines the additional time in seconds added per plate
-  mutate(add_time = if_else(time_point %% 2 == 0, s_per_plate, 0),
-         add_time = add_time + (time_day-1)*s_measurment_interval) %>%
-  left_join(time_layout) %>% 
-  mutate(real_time = well_time + add_time) %>%
-  # seeding pattern 
-  mutate(col = substr(well, 2, 3)) %>% 
-  mutate(col = as.numeric(col),
-         cell = case_when(col %in% c(1:8, 13:20) ~ "cd45_minus",
-                          col %in% c(9:12, 21:24) ~ "cd45_minus_raw_mix")) %>% 
-  # adding replicate anno 
-  mutate(replicate = if_else(grepl(pattern = "12048903", plate), 2, 1))
+I can give a historic overview about the CCLF imaging activity.
+
+```{r}
+anno_w_time %>% 
+  group_by(id_barcode, sample, library, patient_id) %>% 
+  summarise(date = min(date))  %>% 
+  ggplot(aes(date, sample, color = patient_id, label = id_barcode)) + 
+  geom_point(size = 3) + 
+  ggrepel::geom_text_repel(color = "black") +
+  theme_classic() + 
+  theme(legend.position = "bottom") + 
+  scale_color_brewer(type = "qual") + 
+  ggtitle("Samples and their time of acquisition") + 
+  labs(color = "Patient")
 ```
 
 
-After importing and annotating the data I create a shared object and start my exploration. 
+I plot the time layout for every plate. 
 
 ```{r}
-replicate_1_j <- replicate_1 %>%
-  left_join(index_1, copy = TRUE)
+df <- anno_w_time %>% 
+  unite(run, measurement_no, iteration_no, remove = FALSE) %>%
+  select(run, id_barcode, measurement_no,well, time) %>% 
+  mutate(row = substr(well, 1, 1) %>% match(., LETTERS[26:1]),
+         col = substr(well, 2, 3) %>% as.numeric()) %>% 
+  mutate(status = 1)
 
-replicate_2_j <- replicate_2 %>%
-  left_join(index_2, copy = TRUE)
+df %>%
+  ggplot(aes(col, row, fill = time)) + 
+  geom_tile() + 
+  facet_grid(run~id_barcode) + 
+  scale_fill_viridis_c() +
+  ggtitle("Imaged wells during pilot phase, corrected") + 
+  theme_classic() +
+  theme(axis.text.x = element_blank()) + 
+  theme(axis.text.y = element_blank(),
+        legend.position = "bottom") + 
+  labs(fill = "Time in hours")
+```
+
+This approach to time inference has obvious weaknesses: 
+* The method can not distinguish between wells that were purposefully omitted during image capture or failures during the image analysis workflow leading to missing data. While in the 1st scenario, the model is accurate, the second scenario leads to a systematic underestimation of actual acquisition time for every well thereafter.
+
+I write the annotation to the database in a separate table.
+
+```{r, eval = FALSE}
+# set arguments carefully.
+DBI::dbWriteTable(pool, "annotation", anno_w_time, overwrite = FALSE, append = FALSE)
+# annotation <- tbl(pool, "annotation")
 ```
 
 # EDA and QC
 
-The object segmentation is currently not ideal. Therefore I remove objects that are clearly over or undersegmented. I evaluate the size distribution of segmented objects and exclude objects that have extreme values. 
+The object segmentation is currently not ideal. Therefore I remove objects that are clearly over or under-segmented. I evaluate the size distribution of segmented objects and exclude objects that have extreme values. 
 
 I filter all extremely sized objects from the database.
 
-```{r}
+```{r, eval = FALSE}
 # show behaviour of viability over time for untreated and control samples
 # show robustness of sample viability behaviour over time between replicates
 # show similar patterns in compound response for both biological replciates 
-get_area <- function(db){
-  area <- list()
-  
-  area$distribution <- db %>% dplyr::select(area_shape_area, id, cell) %>%
-  collect()
-  
-  area$area_percentile <- area$area_shape_area %>% quantile(probs = seq(0, 1, 0.01))
-  
-  area$min <- unname(area_percentile[2])
-  area$max <- unname(area_percentile[100])
-  
-  return(area)
-}
 
-area_1 <- replicate_1_j %>% get_area()
-#area_2 <- replicate_2_j %>% get_area()
+percentiles <- dbGetQuery(pool, 'select
+  percentile_cont(0.01) within group (order by observation.area_shape_area),
+  percentile_cont(0.99) within group (order by observation.area_shape_area)
+from observation;')
+
+saveRDS(percentiles, here::here("data/percentiles.Rds"))
+```
+
+
+```{r}
+percentiles <- readRDS(here::here("data/percentiles.Rds"))
+max_area <- max(percentiles[1,])
+min_area <- min(percentiles[1,])
+
 
 # updating the database
-replicate_1_j <- replicate_1_j %>%
-  filter(area_shape_area < max & area_shape_area > min)
-
-# # updating the database
-replicate_2_j <- replicate_2_j %>%
-  filter(area_shape_area < max & area_shape_area > min)
-
-area_1$distribution %>% 
-  filter(area_shape_area < area_1$max & area_shape_area > area_1$min) %>%
-  ggplot(aes(area_shape_area, fill = cell)) + 
-  geom_histogram(alpha = 0.3, position="identity") + 
-  theme_classic() + 
-  #facet_wrap(~ cell) + 
-  scale_fill_brewer(type = "qual") +
-  labs(title = "Size Distribution of segmented objects",
-       subtitle = "after removing 1% and 99% percentile",
-       caption = "1047, replicate 1") +
-  theme(legend.position = "None") +
-area_2$distribution %>%
-  filter(area_shape_area < area_2$max & area_shape_area > area_2$min) %>%
-  ggplot(aes(area_shape_area, fill = cell)) +
-  geom_histogram(alpha = 0.3, position="identity") +
-  theme_classic() +
-  #facet_wrap(~ cell) +
-  scale_fill_brewer(type = "qual") +
-  labs(caption = "1047, replicate 2") +
-  ggsave("size_histogram.png")
+observation_f <- observation %>%
+  filter(area_shape_area < max_area & area_shape_area > min_area) %>%
+  left_join(measurement %>% select(contains('id'), well), copy = TRUE) %>%
+  left_join(anno_w_time,copy= TRUE) %>%
+  filter(flag == FALSE & content == "CD45-") %>%
+  filter(measurement_no < 4) %>%
+  mutate(run = paste0(measurement_no, "_", iteration_no))
 
 
 ```
 
+I am also creating a local realization based on these cutoff values. This is a subsample of the dataset.
+
+```{r, eval = FALSE}
+# observation_sample <- dbGetQuery(pool, 
+# "SELECT * 
+# FROM observation O
+# WHERE O.id_observation IN (SELECT id_observation 
+# FROM annotation A
+# WHERE A.confocal = 'TRUE' AND A.compound_name = 'DMSO')
+# ORDER BY RANDOM() 
+# LIMIT 3000;")
+
+observation_f_real <- observation_f %>% 
+  filter((compound_name == 'DMSO' | compound_name == 'Bortezomib')) %>% 
+  # filter(confocal == TRUE) %>% 
+   collect()
+
+observation_f_sample <- observation_f_real %>% 
+  select(contains("_ch3"), contains("_ch4"), 
+         #contains("area"),
+         id_measurement, id_barcode, time, compound_name) %>% 
+  group_by(id_measurement, compound_name) %>% 
+  sample_n(2000) %>%
+  ungroup() 
+
+observation_f_umap_in <- observation_f_sample %>%
+  select(-contains("location"), -contains("_center_"), -id_measurement, -id_barcode,
+         -contains("number"), -time, -compound_name) 
+
+observation_f_umap_out <- uwot::umap(observation_f_umap_in, pca = 50, verbose = TRUE) %>%
+  as_tibble() %>%
+  clean_names()
+
+observation_f_umap_out %>%
+  cbind(observation_f_sample) %>%
+  mutate(ctrl = if_else(compound_name == "Bortezomib", TRUE, FALSE)) %>%
+ ggplot(aes(v1, v2, color = time)) + # area_shape_area intensity_integrated_intensity_ch3
+  geom_point(alpha = 0.1) + 
+  facet_grid(compound_name ~ id_barcode) +
+  scale_color_viridis_c() + 
+  theme_bw() + 
+  labs(title = "UMAP embedding of DMSO and Bortezomib treated cells across cohort",
+       x = "UMAP 1", 
+       y = "UMAP 2",
+       color = "Time [h]") + 
+  ggsave(here::here("umap_borte_dmso.png"), width = 7, height = 3.5)
+  
+```
+
+
+```{r, eval = FALSE}
+gg_size_histogramm <- observation_f %>% 
+  filter(section == 1 & compound_name == "DMSO") %>% # A random DMSO treated well
+  select(area_shape_area, run, id_barcode) %>%
+  collect() %>%
+  ggplot(aes(area_shape_area)) + 
+  geom_histogram(alpha = 0.3, position="identity") + 
+  theme_classic() 
+
+gg_size_histogramm + 
+  scale_fill_brewer(type = "qual") +
+  facet_grid(run~id_barcode) + 
+  labs(title = "Size Distribution of segmented objects",
+       subtitle = "after removing 1% and 99% percentile",
+       caption = "")
+```
+
 I am wondering if the number of objects stays the same over time and across wells. I calculate QC threshold values for each batch that remove wells, if the number of objects is unexpectedly large.
 
-```{r}
+```{r, eval = FALSE}
 get_cell_count <- function(db){
   cell_count <- list()
   
   cell_count$distribution <- db %>% 
-    dplyr::select(well, cell, time_point, plate) %>% 
-    count(well, cell, time_point, plate) %>% 
+    count(well, run, id_barcode, compound_name) %>% 
     collect()
   
   cell_count$threshold <- cell_count$distribution %>%
   ungroup() %>%
-  group_by(time_point) %>% 
+  group_by(run, id_barcode) %>% 
   summarise(sd = sd(n),
             mean = mean(n),
             min = mean-3*sd,
-            max = mean+3*sd#,
-            #min = quantile(n, probs = seq(0, 1, 0.01))[2],
-            #max = quantile(n, probs = seq(0, 1, 0.01))[100]
+            max = mean+3*sd
             )
   
   return(cell_count)
 }
 
-cell_count_1 <- replicate_1_j %>% get_cell_count()
-cell_count_2 <- replicate_2_j %>% get_cell_count()
+cell_count <- observation_f %>% get_cell_count()
 
-# plot_cell_count <- function(cell_count){
-#   cell_count
-# }
 
-cell_count_1$distribution %>%
+cell_count$distribution %>%
   ungroup() %>%
-  mutate(well = factor(well) %>% fct_inorder()) %>%
-  ggplot(aes(well, n, color = cell)) + 
+  mutate(well = factor(well) %>% fct_inorder(),
+         n = as.numeric(n)) %>%
+  ggplot(aes(well, n )) + 
   geom_point(alpha = 0.8) + 
-  geom_smooth(color = "red") +
-  geom_hline(data = cell_count_1$threshold, aes(yintercept = min), linetype = "dashed") + 
-  geom_hline(data = cell_count_1$threshold, aes(yintercept = max), linetype = "dashed") + 
-  facet_wrap(~ time_point, ncol = 2) + 
+  #geom_smooth(color = "red") +
+  geom_hline(data = cell_count$threshold, aes(yintercept = min), linetype = "dashed") + 
+  geom_hline(data = cell_count$threshold, aes(yintercept = max), linetype = "dashed") + 
+  facet_grid(id_barcode ~ run) + 
   theme(axis.text.x = element_blank(),
         legend.position = "None") + 
-  #scale_y_log10() + 
   scale_color_brewer() +
   labs(title = "Number of objects and their distribution across the plate",
        subtitle = "shown are well A01 to P24",
-       caption = "1047, replicate 2") + 
-cell_count_2$distribution %>%
-  ungroup() %>%
-  mutate(well = factor(well) %>% fct_inorder()) %>%
-  ggplot(aes(well, n, color = cell)) + 
-  geom_point(alpha = 0.8) + 
-  geom_smooth(color = "red") +
-  geom_hline(data = cell_count_2$threshold, aes(yintercept = min), linetype = "dashed") + 
-  geom_hline(data = cell_count_2$threshold, aes(yintercept = max), linetype = "dashed") + 
-  facet_wrap(~ time_point, ncol = 2) + 
-  theme(axis.text.x = element_blank()) + 
-  #scale_y_log10() + 
-  scale_color_brewer() +
-  labs(#title = "Number of objects and their distribution across the plate",
-       #subtitle = "shown are well A01 to P24",
-       caption = "1047, replicate 2") + 
-  ggsave("count_threshold.png", width = 8, height = 4)
+       caption = "") 
 ```
 
-It seems as if not all measurment data was gathered: 
 
-* Replicate 1 is missing timepoint 8. This might be because the microscope was running out of storage space and only one field of view was collected for timepoint 7. That also explains the small number of cells per well for timepoint 7. I have to be careful to sample cells in a balanced way from these datasets.
-* Replicate 2 is missing measurment data at timepoints 3 and 4. It turns out that these images were processed but for some reason the measurment data was not ingested into the database. 
-
-Based on these cutoff values I am removing wells that do not pass the QC 
 
 ```{r}
-remove_wells_count <- function(index_df, cell_count){
-flag_id <- cell_count$threshold %>% 
-  dplyr::select(time_point, min, max) %>% 
-  left_join(., cell_count$distribution) %>% 
-  mutate(flag_count = if_else(n > max | n < min, TRUE, FALSE)) %>% 
-  #count(flag_count)
-  filter(flag_count == TRUE) %>% 
-  dplyr::select(plate, well) %>% 
-  left_join(index_df %>% dplyr::select(plate, well, id) %>% distinct()) %>% 
-  .$id
-
-flag_id_keep <- index_df %>% filter(!(id %in% flag_id)) %>% .$id %>% unique()
-
-return(flag_id_keep)
-}
-
-replicate_1_j <- replicate_1_j %>% 
-  filter((id %in% remove_wells_count(index_1, cell_count_1)))
-
-replicate_2_j <- replicate_2_j %>% 
-  filter((id %in% remove_wells_count(index_2, cell_count_2)))
-```
-
-I k
-
-```{r}
-dye_intensity <- replicate_2_j %>% 
-  dplyr::select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, cell, time_point) %>% 
+dye_intensity <- observation_f %>% 
+  dplyr::select(intensity_integrated_intensity_ch3, intensity_integrated_intensity_ch4, 
+                id_barcode, id_measurement, id_observation ,run,
+                time, well, compound_name,
+                object_number, image_number) %>% 
   collect()
 
-dye_cluster <- dye_intensity %>% 
-  nest(intensity_integrated_intensity_ch3, 
-       intensity_integrated_intensity_ch4) %>% 
-  mutate(kmeans = purrr::map(data, ~ .x %>% as.matrix %>% kmeans(centers = 2)),
-         cluster = purrr::map(kmeans, ~ .x %>% .$cluster)) %>% 
-  unnest(cluster)
-
-dye_intensity %>% 
-  left_join(dye_cluster) 
-
-get_dye_intensity <- function(db){
-  dye_intensity <- db %>% 
-  dplyr::select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, cell, time_point, id) %>% 
-  collect()
+dye_intensity <- dye_intensity %>% 
+  mutate(intensity_integrated_intensity_ch3_log = log(intensity_integrated_intensity_ch3)) %>% 
+  mutate(intensity_integrated_intensity_ch4_log = log(intensity_integrated_intensity_ch4)) %>% 
+  group_by(id_barcode, run) %>% 
+  mutate(intensity_integrated_intensity_ch3_log_scale = scale(intensity_integrated_intensity_ch3_log)) %>% 
+  mutate(intensity_integrated_intensity_ch4_log_scale = scale(intensity_integrated_intensity_ch4_log)) %>% 
+  ungroup()
 
 dye_cluster <- dye_intensity %>% 
-  nest(intensity_integrated_intensity_ch3, 
-       intensity_integrated_intensity_ch4) %>% 
-  mutate(kmeans = purrr::map(data, ~ .x %>% as.matrix %>% kmeans(centers = 2)),
-         cluster = purrr::map(kmeans, ~ .x %>% .$cluster)) %>% 
-  unnest(cluster)
+  select(intensity_integrated_intensity_ch4, # also test without log_scale in a bit
+         intensity_integrated_intensity_ch3,
+         id_barcode, run) %>%
+  nest(contains('integrated')) %>% 
+  #head(6) %>%
+  #mutate(kmeans = purrr::map(data, ~ .x %>% as.matrix %>% kmeans(centers = 2)),
+  mutate(kmeans = purrr::map(data, ~ .x %>% as.matrix %>% mclust::Mclust(., G = 2)),
+         cluster = purrr::map(kmeans, ~ .x %>% .$classification),
+         uncertainty = purrr::map(kmeans, ~ .x %>% .$uncertainty)) %>% 
+  unnest(data, cluster, uncertainty)
 
-dye_intensity %>% 
-  left_join(dye_cluster) %>% 
-  return()
-}
+# Reordering cluster labels, so the cluster with the lower average ch4 intensity is labeled as cluster == "dead"
 
-dye_intensity_2 <- get_dye_intensity(replicate_2_j)
 
-%>%
-  ggplot(aes(intensity_integrated_intensity_ch4, color = cluster)) + 
-  geom_histogram() +
-  theme_bw() + 
-  facet_grid(plate ~ time) + 
-  scale_x_log10() + 
-  geom_vline(xintercept = 500)
+dye_overview <- dye_cluster %>% 
+  group_by(id_barcode, run, cluster) %>% 
+  summarise(ch4_mean = mean(intensity_integrated_intensity_ch4)) %>% 
+  arrange(id_barcode, run, ch4_mean) %>% 
+  cbind(., new_cluster = rep(c(1,2), times = nrow(dye_cluster %>% 
+                                              count(id_barcode, run)))) %>% 
+  left_join(dye_cluster, .) %>% 
+  select(-cluster, -ch4_mean) %>%
+  rename(cluster = new_cluster) %>% 
+  mutate(cluster = if_else(cluster == 1, "dead", "alive") %>% factor) %>% 
+  cbind(., dye_intensity %>% 
+                        select(-run, -id_barcode, 
+                               - contains('intensity_integrated_intensity_ch3'), 
+                               - contains('intensity_integrated_intensity_ch4')))
 
-# replicate_1_j %>% 
-#   select(intensity_integrated_intensity_ch4, well, time, plate) %>%
-#   filter(intensity_integrated_intensity_ch4 < 100 & intensity_integrated_intensity_ch4 > 1000) %>%
-#   group_by()
+# dye_overview %>%
+#   mutate(cluster = if_else(cluster == 1, "viable", "dead")) %>%
+#   ggplot(aes(intensity_integrated_intensity_ch4_log, fill = cluster)) + 
+#   geom_histogram(position = "identity") +
+#   theme_bw() + 
+#   facet_grid(run ~ id_barcode) + 
+#   scale_x_log10() 
+
+dye_overview %>% write_rds(here::here("data/dye_overview.Rds"))
 ```
 
-
 ```{r}
-replicate_1_j %>% 
-  #select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, well, time, plate) %>% 
-  ggplot(aes(intensity_integrated_intensity_ch4)) + 
-  geom_histogram() +
-  theme_bw() + 
-  facet_grid(plate ~ time) + 
-  scale_x_log10()
-```
-
-
-```{r}
-replicate_1_j %>% 
-  #select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, well, time, plate) %>% 
+dye_overview  %>% 
+  sample_n(5000) %>%
+  mutate(cluster = if_else(cluster == 1, "viable", "dead")) %>%
   ggplot(aes(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3)) + 
   geom_hex() +
   theme_bw() + 
-  facet_grid(plate ~ time) + 
+  facet_grid(run ~ id_barcode) + 
   scale_x_log10() + 
+  scale_y_log10() + 
+  scale_fill_viridis_c() +
+  geom_density_2d(aes(color = cluster)) + 
+  scale_color_brewer(type = "qual")
+```
+
+
+```{r}
+dye_overview %>% 
+  filter(id_barcode == "000012095103") %>%
+  filter(compound_name == "DMSO") %>%
+  #sample_n(1000000) %>%
+  #select(intensity_integrated_intensity_ch4, intensity_integrated_intensity_ch3, well, time, plate) %>% 
+  ggplot(aes(time, intensity_integrated_intensity_ch3, color = id_barcode)) + 
+  
+  geom_hex() +
+  geom_smooth() +
+  theme_bw() + 
+  #facet_grid( ~ id_barcode) + 
+  #scale_x_log10() + 
   scale_y_log10() + 
   scale_fill_viridis()
 ```
 
 
-```{r}
-max <- area_percentile[100] %>% unname()
-min <- area_percentile[2] %>% unname()
-
-replicate_1_jg <- replicate_1_j %>% 
-  #removing outliers
-  dplyr::filter(area_shape_area < max & area_shape_area > min) %>%
-  group_by(well, time) %>% 
-  summarise_at(vars(area_shape_area:texture_variance_ch4_3_03), funs(mean, var, n), na.rm = TRUE)  %>% collect()
-```
 
 # Quick and Dirty cutoff 
 
 ```{r}
-replicate_1_jd <- replicate_1_j %>% 
-  #removing outliers
-  dplyr::filter(area_shape_area < max & area_shape_area > min) %>% 
-  mutate(alive = if_else(intensity_integrated_intensity_ch4 > 500, 1, 0))
-
-replicate_1_jdr <- replicate_1_jd %>% 
+ %>% 
   group_by(well, time, plate) %>%
   summarise(n = n(),
             sum = sum(alive)) %>% 
@@ -835,7 +879,7 @@ viability_anno %>%
 ```
 
 
-We can see a slight shift of estimated proportions dependent on the day of measurment and the number of observations. We should apply an emperical bayes estimator to account for both effects that impact proportions.
+We can see a slight shift of estimated proportions dependent on the day of measurement and the number of observations. We should apply an empirical Bayes estimator to account for both effects that impact proportions.
 
 # UMAP
 
@@ -1109,5 +1153,6 @@ umap_sample_afa_dmso$layout %>% as_tibble() %>% #cbind(cluster_bf$cluster,.) %>%
   theme_bw() + 
   scale_color_viridis()
 ```
+
 
 
